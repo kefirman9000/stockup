@@ -45,6 +45,11 @@ VERSION = "1.6.0"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 STARTED = time.time()
+MILESTONES = []  # (step, seconds since StockUp started): used to check how fast it opens
+
+
+def milestone(step):
+    MILESTONES.append((step, round(time.time() - STARTED, 2)))
 
 
 def _config_dir():
@@ -3713,6 +3718,8 @@ def make_handler(app):
                 if p in NEEDS_BATCH and not batch:
                     return self._send(200, {"error": "Open a batch first."})
                 if p == "/":
+                    if not app.page_ready_at:
+                        milestone("page requested")
                     page = PAGE.replace("__SS__", json.dumps(SHUTTERSTOCK_CATEGORIES)) \
                         .replace("__AD__", json.dumps({str(k): v for k, v in ADOBE_CATEGORIES.items()})) \
                         .replace("__SITES__", json.dumps({k: {"label": v["label"], "short": v["short"],
@@ -3723,6 +3730,8 @@ def make_handler(app):
                     return self._send(200, page, "text/html; charset=utf-8")
                 if p == "/api/scan":
                     return self._send(200, batch.scan)
+                if p == "/api/items" and not app.page_ready_at:
+                    milestone("photo list requested")
                 if p == "/api/items" and not batch:
                     return self._send(200, {"no_batch": True, "recent": recent_batches(),
                                             "native": bool(app.window),
@@ -3748,6 +3757,8 @@ def make_handler(app):
                     app.closed_at = None
                     return self._send(200, {"ok": True})
                 if p == "/api/ready":  # the page has drawn itself
+                    if not app.page_ready_at:
+                        milestone("page drawn")
                     app.page_ready_at = app.page_ready_at or time.time()
                     return self._send(200, {"ok": True})
                 if p == "/api/version":
@@ -4076,10 +4087,16 @@ def start_server(app):
 def serve(paths):
     """Open StockUp. With no folder, it starts on the welcome screen. Folders or photos
     dropped on the app's icon (or given on the command line) open straight away."""
+    milestone("python ready")
     app = App()
     server = start_server(app)  # ready in a fraction of a second
+    milestone("server ready")
     url = f"http://127.0.0.1:{server.server_address[1]}/"
-    threading.Thread(target=load_sites, daemon=True).start()  # warm up the keychain meanwhile
+
+    def warm_keychain():
+        load_sites()
+        milestone("keychain ready")
+    threading.Thread(target=warm_keychain, daemon=True).start()
     if paths:
         folder, only = import_paths([os.path.abspath(p) for p in paths])
         if folder:
@@ -4124,6 +4141,7 @@ def open_window(app, url):
         from webview.dom import DOMEventHandler
     except Exception:
         return False
+    milestone("window library loaded")
     check_file = os.environ.get("STOCKUP_WINDOW_CHECK")  # used by the release checks
     try:
         window = webview.create_window(f"StockUp", url, width=1360, height=900,
@@ -4140,11 +4158,13 @@ def open_window(app, url):
                                  "through is cleaned up the next time you upload.")
         return True
     window.events.closing += closing
+    milestone("window created")
 
     def on_drop(e):
         handle_native_drop(app, window, e)
 
     def started(win):
+        milestone("window open")
         try:
             win.dom.document.events.drop += DOMEventHandler(on_drop, True, True)
         except Exception:
@@ -4233,6 +4253,8 @@ def _window_check(app, window, out):
         fh.write(f"window: {'ok' if app.page_ready_at else 'FAILED page never showed'}\n")
         if app.page_ready_at:
             fh.write(f"ready_after: {app.page_ready_at - STARTED:.2f}\n")
+        for step, t in MILESTONES:
+            fh.write(f"step: {t:6.2f}s  {step}\n")
     window.destroy()
 
 
