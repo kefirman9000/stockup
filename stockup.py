@@ -2684,31 +2684,48 @@ def update_blocker(loc):
 MAC_SWAP = r'''#!/bin/bash
 # StockUp update: wait for StockUp to quit, swap in the new version, keep the old one, reopen.
 pid="$1"; old="$2"; new="$3"; backup="$4"; shift 4
+log="$(dirname "$(dirname "$backup")")/update.log"
+echo "$(date) waiting for StockUp ($pid) to quit" > "$log"
 for i in $(seq 1 600); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
 sleep 0.3
 rm -rf "$backup"; mkdir -p "$(dirname "$backup")"
-if mv "$old" "$backup"; then
-  if ! mv "$new" "$old"; then mv "$backup" "$old"; fi
-fi
+if mv "$old" "$backup" 2>>"$log"; then
+  echo "moved the current version aside" >> "$log"
+  if mv "$new" "$old" 2>>"$log"; then echo "new version in place" >> "$log"
+  else mv "$backup" "$old"; echo "couldn't place the new version; put the old one back" >> "$log"; fi
+else echo "couldn't move the current version; nothing changed" >> "$log"; fi
 "$@" >/dev/null 2>&1 &
+echo "reopened" >> "$log"
 '''
 
-WIN_SWAP = r'''param([int]$WaitPid, [string]$Old, [string]$New, [string]$Backup, [string]$Launch, [string]$Arg)
+WIN_SWAP = r'''param([int]$WaitPid, [string]$Old, [string]$New, [string]$Backup, [string]$Launch = '', [string]$Arg = '')
 # StockUp update: wait for StockUp to quit, swap in the new version, keep the old one, reopen.
-try { Wait-Process -Id $WaitPid -Timeout 120 -ErrorAction SilentlyContinue } catch {}
+$Log = Join-Path (Split-Path (Split-Path $Backup)) 'update.log'
+function Note([string]$t) { Add-Content -LiteralPath $Log -Value ((Get-Date -Format s) + ' ' + $t) }
+Set-Content -LiteralPath $Log -Value ((Get-Date -Format s) + " waiting for StockUp ($WaitPid) to quit")
+try { Wait-Process -Id $WaitPid -Timeout 120 -ErrorAction Stop } catch { Note "wait: $_" }
 Start-Sleep -Milliseconds 500
-function Retry([scriptblock]$Do) {
-  for ($i = 0; $i -lt 40; $i++) { try { & $Do; return $true } catch { Start-Sleep -Milliseconds 500 } }
+function Retry([scriptblock]$Do, [string]$What) {
+  for ($i = 0; $i -lt 40; $i++) {
+    try { & $Do; return $true } catch { if ($i -eq 0 -or $i -eq 39) { Note "$What (try $i): $_" }; Start-Sleep -Milliseconds 500 }
+  }
   return $false
 }
-if (Test-Path -LiteralPath $Backup) { Retry { Remove-Item -LiteralPath $Backup -Recurse -Force -ErrorAction Stop } | Out-Null }
-if (Retry { Move-Item -LiteralPath $Old -Destination $Backup -ErrorAction Stop }) {
-  if (-not (Retry { Move-Item -LiteralPath $New -Destination $Old -ErrorAction Stop })) {
-    Retry { Move-Item -LiteralPath $Backup -Destination $Old -ErrorAction Stop } | Out-Null
+if (Test-Path -LiteralPath $Backup) { Retry { Remove-Item -LiteralPath $Backup -Recurse -Force -ErrorAction Stop } 'remove old backup' | Out-Null }
+if (Retry { Move-Item -LiteralPath $Old -Destination $Backup -ErrorAction Stop } 'move current version aside') {
+  Note 'moved the current version aside'
+  if (Retry { Move-Item -LiteralPath $New -Destination $Old -ErrorAction Stop } 'place new version') {
+    Note 'new version in place'
+  } else {
+    Retry { Move-Item -LiteralPath $Backup -Destination $Old -ErrorAction Stop } 'restore old version' | Out-Null
+    Note "couldn't place the new version; put the old one back"
   }
-}
+} else { Note "couldn't move the current version; nothing changed" }
 if (-not $Launch) { $Launch = Join-Path $Old 'StockUp.exe' }
-if ($Arg) { Start-Process -FilePath $Launch -ArgumentList ('"' + $Arg + '"') } else { Start-Process -FilePath $Launch }
+try {
+  if ($Arg) { Start-Process -FilePath $Launch -ArgumentList ('"' + $Arg + '"') -ErrorAction Stop } else { Start-Process -FilePath $Launch -ErrorAction Stop }
+  Note 'reopened'
+} catch { Note "reopen: $_" }
 '''
 
 
