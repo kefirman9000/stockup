@@ -2871,12 +2871,19 @@ def launch_swap(kind, old, new, backup, folder):
         with open(script, "w", encoding="utf-8-sig") as fh:
             fh.write(WIN_SWAP)
         launch, arg = (test_launch.split("\x1f") + [""])[:2] if test_launch else ("", folder)
-        flags = 0x00000008 | 0x00000200 | 0x08000000  # detached, own group, no console window
-        subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                          "-WindowStyle", "Hidden", "-File", script, "-WaitPid", wait_pid,
-                          "-Old", old, "-New", new, "-Backup", backup, "-Launch", launch,
-                          "-Arg", arg], creationflags=flags, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Windows PowerShell silently drops empty arguments, which shifts the rest, so only
+        # pass the ones that have a value. Its own messages go to a file, for diagnosing.
+        args = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", script, "-WaitPid", wait_pid, "-Old", old, "-New", new, "-Backup", backup]
+        if launch:
+            args += ["-Launch", launch]
+        if arg:
+            args += ["-Arg", arg]
+        out = open(os.path.join(os.path.dirname(script), "swap-output.txt"), "w")
+        flags = 0x00000200 | 0x08000000  # its own process group, no console window
+        subprocess.Popen(args, creationflags=flags, stdin=subprocess.DEVNULL,
+                         stdout=out, stderr=subprocess.STDOUT, close_fds=True)
+        out.close()
 
 
 def restart_program(server, folder):

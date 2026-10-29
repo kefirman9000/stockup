@@ -126,8 +126,11 @@ def test_app_updates_itself_keeps_a_backup_and_reopens(stockup, release, frozen_
     try:
         wait(lambda: marker.exists())  # swapped, then reopened
     except AssertionError:
+        out = os.path.join(work, "swap-output.txt")
         raise AssertionError("didn't reopen. Update log:\n" + (open(log).read() if os.path.exists(log)
-                                                             else "(no log: the helper never ran)"))
+                             else "(no log: the helper never ran)") + "\nHelper output:\n" +
+                             (open(out, errors="replace").read() if os.path.exists(out) else "(none)") +
+                             "\nFolder: " + repr(os.listdir(work) if os.path.isdir(work) else None))
     exe = frozen_app["exe"]
     assert open(exe).read() == "version 9.9.9"  # the new version is in place
     backup = os.path.join(work, "previous", os.path.basename(frozen_app["path"]))
