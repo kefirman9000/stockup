@@ -30,7 +30,7 @@ def home(tmp_path, monkeypatch):
 @pytest.fixture
 def page(stockup, home):
     app = stockup.App()
-    server = stockup.ThreadingHTTPServer(("127.0.0.1", 0), stockup.make_handler(app))
+    server = stockup.LocalServer(("127.0.0.1", 0), stockup.make_handler(app))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_address[1]}", app
     server.shutdown()

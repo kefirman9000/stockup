@@ -14,7 +14,7 @@ def page(stockup, batch_dir):
     make_photo(batch_dir, "a.jpg")
     batch = stockup.Batch(batch_dir)
     app = stockup.App(batch)
-    server = stockup.ThreadingHTTPServer(("127.0.0.1", 0), stockup.make_handler(app))
+    server = stockup.LocalServer(("127.0.0.1", 0), stockup.make_handler(app))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_address[1]}", batch
     server.shutdown()
@@ -53,3 +53,22 @@ def test_upload_waits_for_the_photo_check(page):
     batch.scan["ready"] = False
     code, body = call(url + "/api/upload", {"sites": ["shutterstock"]})
     assert b"still checking" in body
+
+
+def test_starts_without_waiting_on_the_network(stockup, monkeypatch):
+    """Python's standard server looks up the computer's network name when it starts, which
+    hung for 35 seconds on a Mac. StockUp's server must never wait for that."""
+    import socket
+    import time
+
+    def slow_lookup(*a, **kw):
+        time.sleep(10)
+        return "slow.example"
+    monkeypatch.setattr(socket, "getfqdn", slow_lookup)
+    monkeypatch.delenv("STOCKUP_PORT", raising=False)
+    t = time.time()
+    server = stockup.start_server(stockup.App())
+    took = time.time() - t
+    server.shutdown()
+    server.server_close()
+    assert took < 1, f"starting took {took:.1f}s"
