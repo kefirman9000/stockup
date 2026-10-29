@@ -42,10 +42,11 @@ def cert(tmp_path):
     return c
 
 
-def pytest_runtest_logreport(report):
+def pytest_terminal_summary(terminalreporter):
     """On GitHub, show each failing test as a note on the run, so it can be read without logs."""
-    if report.failed and os.environ.get("GITHUB_ACTIONS"):
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    for report in terminalreporter.stats.get("failed", []) + terminalreporter.stats.get("error", []):
         text = str(report.longrepr)[-1800:]
         msg = text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
-        sys.__stdout__.write(f"::error title={report.nodeid}::{msg}\n")
-        sys.__stdout__.flush()
+        terminalreporter.write_line(f"::error title={report.nodeid}::{msg}")
