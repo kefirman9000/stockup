@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import ssl
+import secrets
 import struct
 import sys
 import threading
@@ -40,7 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 
@@ -292,6 +293,7 @@ DEFAULT_OPTIONS = {
     "upload_order": "spread",        # "spread": shuffled, look-alikes kept apart; "folder"
     "upload_pacing": "together",     # "together": all sites at once; "one_by_one"
     "auto_categories": True,         # fill in categories from titles and keywords when empty
+    "recent": [],                    # batch folders you opened lately
 }
 
 
@@ -1004,15 +1006,17 @@ FINGERPRINTS_NAME = ".stockup_fingerprints.json"
 
 
 class Batch:
-    def __init__(self, folder, background=False):
+    def __init__(self, folder, background=False, only=None):
         self.folder = os.path.abspath(folder)
+        self.only = sorted(only) if only else None  # just these photos from the folder
         self.out = os.path.join(self.folder, OUT_NAME)
         self.state_path = os.path.join(self.folder, STATE_NAME)
         self.thumbs, self.meta = {}, {}
         self.lock = threading.RLock()
         self.files = sorted(
             (f for f in os.listdir(self.folder)
-             if f.lower().endswith(IMAGE_EXT) and not f.startswith(".")),
+             if f.lower().endswith(IMAGE_EXT) and not f.startswith(".")
+             and (not only or f in only)),
             key=str.lower)
         self.sha, self.look, self.stat, self.twins = {}, {}, {}, {}
         for f in self.files:  # quick: only reads the start of each file
@@ -1025,6 +1029,7 @@ class Batch:
         self.scan = {"done": 0, "total": len(self.files), "ready": False}
         self.sent = self._load_sent()
         self.history = load_history()
+        self._looks_idx, self._looks, self._looks_cache = None, [], {}
         self.state = self._load_state()
         if background:
             threading.Thread(target=self._fingerprint, daemon=True).start()
@@ -1040,7 +1045,7 @@ class Batch:
                 cache = json.load(fh)
         except (OSError, ValueError):
             cache = {}
-        fresh = {}
+        fresh = {k: v for k, v in cache.items() if k not in self.stat}  # keep other photos' entries
         for i, f in enumerate(self.files):
             p = os.path.join(self.folder, f)
             c = cache.get(f)
@@ -1094,11 +1099,43 @@ class Batch:
             return "exact", e
         look = self.look.get(f)
         if look:
-            for lk, st, date, folder, name in self.history["looks"]:
-                if st == site and not (folder == self.folder and name == f) \
-                        and _bits_apart(look, lk) <= 4:
-                    return "looks", {"date": date, "batch": folder, "file": name}
+            key = (f, site, look)
+            if key not in self._looks_cache:
+                self._looks_cache[key] = self._find_look_alike(int(look, 16), site, f)
+            hit = self._looks_cache[key]
+            if hit:
+                return "looks", hit
         return None, None
+
+    def _find_look_alike(self, look, site, f):
+        """Photos sent before whose 'looks like' hash is within 4 bits of this one.
+        Two hashes that close must share at least 4 of their 8 bytes, so only photos sharing
+        a byte in the same place are compared. Fast even with a history of many thousands."""
+        index = self._looks_index()
+        seen = set()
+        for pos in range(8):
+            for i in index.get((site, pos, (look >> (8 * pos)) & 0xFF), ()):
+                if i in seen:
+                    continue
+                seen.add(i)
+                lk, st, date, folder, name = self._looks[i]
+                if bin(look ^ lk).count("1") <= 4 and not (folder == self.folder and name == f):
+                    return {"date": date, "batch": folder, "file": name}
+        return None
+
+    def _looks_index(self):
+        if self._looks_idx is None:
+            self._looks, idx = [], {}
+            for lk, st, date, folder, name in self.history["looks"]:
+                try:
+                    v = int(lk, 16)
+                except (TypeError, ValueError):
+                    continue
+                self._looks.append((v, st, date, folder, name))
+                for pos in range(8):
+                    idx.setdefault((st, pos, (v >> (8 * pos)) & 0xFF), []).append(len(self._looks) - 1)
+            self._looks_idx = idx
+        return self._looks_idx
 
     # ---- state -------------------------------------------------------------
     def _load_state(self):
@@ -1109,6 +1146,8 @@ class Batch:
                     st = json.load(fh).get("files", {})
             except (OSError, ValueError):
                 st = {}
+        # work saved for photos that aren't open this time is kept as it is
+        self._others = {f: v for f, v in st.items() if f not in self.meta}
         opts = load_options()
         for f in self.files:
             m, s = self.meta[f], st.setdefault(f, {})
@@ -1187,7 +1226,7 @@ class Batch:
                                                         cur["editorial"], m["description"])["dt"]
             tmp = self.state_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump({"version": VERSION, "files": self.state}, fh, indent=1)
+                json.dump({"version": VERSION, "files": {**self._others, **self.state}}, fh, indent=1)
             os.replace(tmp, self.state_path)
 
     def auto_reason(self, f, opts):
@@ -1457,6 +1496,7 @@ class Batch:
                 sites[st] = {k: p[k] for k in ("status", "issues", "user_skipped", "forced",
                                                "ops")}
             out.append({"file": f, "title": m["title"], "description": m["description"],
+                        "mtime": self.stat[f][1],
                         "keywords": m["keywords"], "info": m["info"], "label": m.get("label", ""),
                         "preformatted": looks_editorial(m["description"]) or looks_editorial(m["title"]),
                         "auto": self.auto_reason(f, opts), "sites": sites,
@@ -2035,10 +2075,14 @@ class SFTPConn:
             import paramiko
         except ImportError:
             raise RuntimeError("SFTP needs paramiko: run  pip install paramiko")
-        self.t = paramiko.Transport((site["host"], site["port"]))
+        import socket as _socket
+        sock = _socket.create_connection((site["host"], site["port"]), timeout=timeout)
+        self.t = paramiko.Transport(sock)
         self.t.banner_timeout = timeout
+        self.t.auth_timeout = timeout
         self.t.connect(username=site["username"], password=site["password"])
         self.sftp = paramiko.SFTPClient.from_transport(self.t)
+        self.sftp.get_channel().settimeout(timeout)  # a stalled transfer gives up instead of hanging
         if site["remote_dir"] not in ("", "/"):
             self.sftp.chdir(site["remote_dir"])
 
@@ -2064,12 +2108,12 @@ class SFTPConn:
             pass
 
 
-def connect(site):
+def connect(site, timeout=60):
     if not site["username"] or not site["password"]:
         raise RuntimeError("login not set yet - add it under Logins")
     enc_only = load_options()["encrypted_only"]
     cls = SFTPConn if site["protocol"] == "sftp" else FTPConn
-    return cls(site, encrypted_only=enc_only)
+    return cls(site, timeout=timeout, encrypted_only=enc_only)
 
 
 def connection_label(protocol):
@@ -2444,25 +2488,29 @@ def sites_summary():
 
 
 def test_sites():
-    results = []
+    """Check every login at the same time, giving each site up to 15 seconds."""
     my = load_options()["my_sites"]
-    for s in load_sites():
-        if s["name"] not in my:
-            continue
-        r = {"name": s["name"], "label": SITES[s["name"]]["label"]}
+    sites = [s for s in load_sites() if s["name"] in my]
+    results = [{"name": s["name"], "label": SITES[s["name"]]["label"]} for s in sites]
+
+    def check(s, r):
         if not s["username"]:
             r["result"] = "No login yet"
-            results.append(r)
-            continue
+            return
         try:
-            c = connect(s)
+            c = connect(s, timeout=15)
             r["listing"] = c.listdir()[:30]
             r["encrypted"] = c.encrypted
             c.close()
             r["result"] = "OK"
         except Exception as e:
             r["result"] = f"Couldn't connect: {e}"
-        results.append(r)
+    threads = [threading.Thread(target=check, args=(s, r), daemon=True) for s, r in zip(sites, results)]
+    for t in threads:
+        t.start()
+    for t, r in zip(threads, results):
+        t.join(40)
+        r.setdefault("result", "Couldn't connect: no answer from the site")
     return results
 
 
@@ -2596,6 +2644,25 @@ input[type=checkbox],input[type=radio]{width:auto;padding:0;margin:0}
 .seg button{border:none;border-radius:0;padding:4px 9px;font-size:12px}
 .seg button.on{background:var(--accent);color:var(--on-accent)}
 .count{display:inline-block;min-width:18px;padding:0 5px;border-radius:9px;background:var(--warn);color:var(--panel);font-size:11px;font-weight:700;margin-left:4px}
+#welcome{display:none;max-width:860px;margin:28px auto 60px;padding:0 16px}
+body.nobatch #welcome{display:block}
+body.nobatch header .bar,body.nobatch main,body.nobatch footer,body.nobatch #checksBtn,
+body.nobatch #anotherBtn,body.nobatch #mode,body.nobatch #scanbar{display:none!important}
+#dropzone{border:2px dashed var(--line);border-radius:16px;padding:44px 20px;text-align:center;background:var(--panel)}
+#dropzone h2{margin:0 0 6px;font-size:22px}
+#dropzone .hint{max-width:560px;margin:0 auto 18px}
+.choices{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.pathrow{display:flex;gap:6px;justify-content:center;margin-top:14px;flex-wrap:wrap}
+.pathrow input{width:min(420px,100%)}
+#recent h3{font-size:15px;margin:26px 0 8px}
+.rec{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);margin-bottom:8px;cursor:pointer}
+.rec:hover{border-color:var(--accent)}
+.rec .path{font-size:12px;color:var(--mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:520px}
+#droplay{position:fixed;inset:0;z-index:20;display:none;align-items:center;justify-content:center;background:color-mix(in srgb,var(--bg) 82%,transparent)}
+#droplay div{border:3px dashed var(--accent);border-radius:18px;padding:40px 60px;background:var(--panel);font-size:20px;font-weight:600;text-align:center}
+#droplay small{display:block;font-size:13px;font-weight:400;color:var(--mute);margin-top:6px}
+#busy{position:fixed;inset:0;z-index:21;display:none;align-items:center;justify-content:center;background:color-mix(in srgb,var(--bg) 70%,transparent)}
+#busy .card2{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 22px;width:min(440px,calc(100% - 32px));box-shadow:0 8px 30px var(--shadow)}
 #scanbar{display:none;margin-top:8px;font-size:12px;color:var(--mute)}
 #scanbar .prog{height:4px;margin-top:4px}
 #banner{display:none;margin-top:8px;padding:7px 10px;border-radius:8px;background:var(--warn-bg);font-size:13px}
@@ -2671,7 +2738,7 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
     </div>
     <button onclick="openLogins()">Logins</button>
     <button onclick="openSettings()">Settings</button>
-    <button onclick="another()">Another batch</button>
+    <button onclick="another()" id="anotherBtn">Another batch</button>
     <button onclick="quitApp()">Quit</button>
   </div>
   <div id="banner"></div>
@@ -2710,9 +2777,24 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
     </div>
   </div>
 </header>
+<section id="welcome">
+  <div id="dropzone">
+    <h2>Drop photos or a folder here</h2>
+    <p class="hint">StockUp opens them right where they are when it can find them on your computer. If it can’t, it copies them into a new batch folder, and your originals stay where they were.</p>
+    <div class="choices">
+      <button class="primary" onclick="pickFolder()">Choose a folder…</button>
+      <button onclick="$('pickFiles').click()">Choose photos…</button>
+      <input type="file" id="pickFiles" multiple accept=".jpg,.jpeg,image/jpeg" hidden onchange="filesChosen(this)">
+    </div>
+    <div class="pathrow"><input id="pathIn" placeholder="…or paste a folder’s location" onkeydown="if(event.key=='Enter')openPath()"><button onclick="openPath()">Open</button></div>
+  </div>
+  <div id="recent"></div>
+</section>
 <main><div class="grid" id="grid"></div></main>
 <div id="panel"></div>
 <div id="dock"></div>
+<div id="droplay"><div>Drop to open these photos<small id="droplayHint"></small></div></div>
+<div id="busy"><div class="card2"><b id="busyTitle"></b><div class="prog"><i id="busyFill"></i></div><div class="hint" id="busyText"></div></div></div>
 <footer>
   <span id="msg">Click a photo to pick it. Shift-click to pick a range.</span>
   <div class="sites" id="sites"></div>
@@ -2782,7 +2864,7 @@ function render(){
     const mp=(it.info.width*it.info.height/1e6).toFixed(1);
     return `<div class="card ${sel.has(it.file)?'sel':''} ${it.editorial?'ed':''}" data-f="${esc(it.file)}" title="${esc(it.auto?'Marked editorial automatically: '+it.auto:'')}">
       <div class="check">${sel.has(it.file)?'✓':''}</div>
-      <img class="thumb" loading="lazy" src="/thumb/${encodeURIComponent(it.file)}" alt="">
+      <img class="thumb" loading="lazy" src="/thumb/${encodeURIComponent(it.file)}?v=${it.info.bytes}-${it.mtime||0}" alt="">
       <div class="meta"><div class="fn"><span>${esc(it.file)}</span><span>${mp} MP</span></div><div class="tt">${esc(it.description||it.title||'(no title)')}</div>
       <div class="tags">${t.join('')}</div>${chips(it)}
       <button class="link small" data-detail="${esc(it.file)}">Site details</button></div></div>`}).join(''):'<div class="empty">No photos to show here.</div>';
@@ -2824,7 +2906,8 @@ function applyDT(){if(!need())return;const c=[$('dt1').value,$('dt2').value,$('d
   if(!c.length)return note('Choose a Dreamstime category first.');each(it=>it.dt_cats=[...new Set(c)])}
 function applyLoc(){if(!need())return;const c=$('ecity').value.trim(),r=$('eregion').value.trim(),d=$('edate').value;
   if(!c&&!r&&!d)return note('Type a place or pick a date first.');each(it=>{if(c)it.ed_city=c;if(r)it.ed_region=r;if(d)it.ed_date=d})}
-function note(t){$('msg').textContent=t}
+let keepNoteUntil=0;
+function note(t,keep){if(!keep&&Date.now()<keepNoteUntil)return;$('msg').textContent=t;if(keep)keepNoteUntil=Date.now()+12000}
 function counts(){const e=items.filter(i=>i.editorial).length;return `${e} editorial, ${items.length-e} creative`}
 function changed(){dirty=true;render();clearTimeout(saveT);saveT=setTimeout(async()=>{await save();await load()},500)}
 async function save(){
@@ -3122,8 +3205,7 @@ async function doUpdate(){
 }
 async function another(){
   await save();
-  try{const r=await api('/api/another',{});if(!r.ok)return note(r.message);
-    document.body.innerHTML='<div class="empty">Choose your next batch folder in the window that just opened. This page will reload by itself… If nothing happens, open StockUp again.</div>';}
+  try{const r=await api('/api/another',{});if(!r.ok)return note(r.message);closePanel();await load()}
   catch(e){note(e.message)}
 }
 async function quitApp(force){
@@ -3149,54 +3231,386 @@ async function watchScan(){
   showScan(sc);
   if(sc.ready){await save();await load();note('Photos checked · '+counts())}else scanT=setTimeout(watchScan,700);
 }
+/* opening batches */
+function showBusy(title,text,pct){$('busy').style.display=title?'flex':'none';if(!title)return;
+  $('busyTitle').textContent=title;$('busyText').textContent=text||'';$('busyFill').style.width=(pct||0)+'%'}
+function showWelcome(r){
+  document.body.classList.add('nobatch');
+  $('folder').textContent='';
+  $('recent').innerHTML=r.recent.length?'<h3>Recent batches</h3>'+r.recent.map(b=>`<div class="rec" onclick="openFolder(${jattr(b.folder)})">
+      <div><b>${esc(b.name)}</b><div class="path">${esc(b.folder)}</div></div><div class="hint">${b.photos} photos · ${esc(b.when)}</div></div>`).join(''):'';
+}
+async function openFolder(folder,only){
+  showBusy('Opening…',folder);
+  try{await save();await api('/api/open',{folder,only});sel=new Set();last=null;await load();
+    note(only||window._fromDrop?`Opened ${items.length} photo${items.length==1?'':'s'} right where they are — nothing was copied.`:'Opened · '+counts(),!!(only||window._fromDrop))}
+  catch(e){note(e.message);alert(e.message)}
+  finally{showBusy()}
+}
+function openPath(){const v=$('pathIn').value.trim();if(v)openFolder(v)}
+async function pickFolder(){
+  showBusy('Choose a folder','A folder window has opened. If you don’t see it, it may be behind this browser window.',0);
+  try{const r=await api('/api/pick_folder',{});if(r.ok){sel=new Set();last=null;await load();note('Opened · '+counts())}}
+  catch(e){note(e.message);alert(e.message)}
+  finally{showBusy()}
+}
+const isJpeg=n=>/\.jpe?g$/i.test(n)&&!n.startsWith('.');
+function readAll(reader){return new Promise((ok,bad)=>{const out=[];const next=()=>reader.readEntries(es=>{if(!es.length)return ok(out);out.push(...es);next()},bad);next()})}
+async function walk(entry,path,out){
+  if(entry.isFile){const f=await new Promise((ok,bad)=>entry.file(ok,bad));out.push({file:f,path:path+f.name})}
+  else if(entry.isDirectory){for(const e of await readAll(entry.createReader()))await walk(e,path+entry.name+'/',out)}
+}
+async function collect(dt){
+  const entries=[...dt.items].filter(i=>i.kind=='file').map(i=>i.webkitGetAsEntry&&i.webkitGetAsEntry()).filter(Boolean);
+  if(!entries.length)return {list:[...dt.files].map(f=>({file:f,path:f.name})),folder:''};
+  const out=[];for(const e of entries)await walk(e,'',out);
+  const folder=entries.length==1&&entries[0].isDirectory?entries[0].name:'';
+  return {list:out,folder};
+}
+async function chooseAddOrNew(){
+  return new Promise(res=>{window._addNew=res;
+    panel(`<h3>Add these photos?</h3><p>This batch was made from photos you dropped in, so StockUp can add these to it.</p>
+      <p><button class="primary" onclick="closePanel();_addNew(true)">Add to this batch</button> <button onclick="closePanel();_addNew(false)">Open as a new batch</button></p>`)});
+}
+async function openDropped(list,folderName){
+  const photos=list.filter(x=>isJpeg(x.file.name)),others=list.length-photos.length;
+  if(!photos.length)return alert('None of those are JPEG photos. StockUp works with JPEGs.');
+  if(dirty)await save();
+  // 1. are they already on this computer? then open them right there, nothing copied
+  const nested=photos.some(x=>x.path.split('/').length>(folderName?2:1));
+  if(!nested){
+    showBusy('Looking for these photos on your computer…','So they can be opened where they are, without copying.',0);
+    try{const r=await api('/api/drop/locate',{folder_name:folderName,files:photos.map(x=>({name:x.file.name,size:x.file.size,mtime:x.file.lastModified}))});
+      showBusy();
+      if(r.folder){window._fromDrop=true;await openFolder(r.folder,r.only);window._fromDrop=false;
+        if(others)note(note_txt()+` (${others} non-JPEG file${others>1?'s were':' was'} left out)`,true);return}}
+    catch(e){showBusy()}
+  }
+  // 2. not found: copy them into a batch folder
+  let add=false;
+  if(!document.body.classList.contains('nobatch')&&window._dropped)add=await chooseAddOrNew();
+  let start;try{start=await api('/api/drop/start',{add})}catch(e){return alert(e.message)}
+  let done=0,failed=0;const q=photos.slice();
+  const work=async()=>{while(q.length){const x=q.shift();
+    try{const r=await fetch(`/api/drop/file?token=${start.token}&name=${encodeURIComponent(x.file.name)}`,{method:'POST',body:x.file});if(!r.ok)failed++}catch(e){failed++}
+    done++;showBusy(start.adding?'Adding photos to this batch…':'Copying photos into a new batch…',`${done} of ${photos.length} · ${start.folder}`,100*done/photos.length)}};
+  showBusy('Copying photos…','',0);
+  await Promise.all([work(),work(),work()]);
+  try{await api('/api/drop/finish',{token:start.token});sel=new Set();last=null;await load();
+    note(`${start.adding?'Added':'Copied'} ${done-failed} photo${done-failed==1?'':'s'} ${start.adding?'to this batch':'into '+start.folder} (StockUp couldn’t find where they live on your computer). Your originals are where they were.`+
+      (failed?` ${failed} couldn’t be copied.`:'')+(others?` ${others} non-JPEG file${others>1?'s were':' was'} left out.`:''),true)}
+  catch(e){alert(e.message)}
+  finally{showBusy()}
+}
+const note_txt=()=>$('msg').textContent;
+function filesChosen(inp){const list=[...inp.files].map(f=>({file:f,path:f.name}));inp.value='';openDropped(list,'')}
+let dragDepth=0;
+const hasFiles=e=>e.dataTransfer&&[...(e.dataTransfer.types||[])].includes('Files');
+window.addEventListener('dragenter',e=>{if(!hasFiles(e))return;e.preventDefault();dragDepth++;
+  $('droplayHint').textContent=document.body.classList.contains('nobatch')?'Photos or folders':'They open as a new batch (or can be added to a batch made from dropped photos)';
+  $('droplay').style.display='flex'});
+window.addEventListener('dragover',e=>{if(hasFiles(e))e.preventDefault()});
+window.addEventListener('dragleave',e=>{if(!hasFiles(e))return;dragDepth=Math.max(0,dragDepth-1);if(!dragDepth)$('droplay').style.display='none'});
+window.addEventListener('drop',async e=>{if(!hasFiles(e))return;e.preventDefault();dragDepth=0;$('droplay').style.display='none';
+  if(lastStatus&&lastStatus.running)return alert('Wait for the upload to finish before opening other photos.');
+  const {list,folder}=await collect(e.dataTransfer);openDropped(list,folder)});
+
 async function load(){
-  const r=await api('/api/items');items=r.items;opts=r.options;VERSION=r.version;FROZEN=r.frozen;PILLOW=r.pillow;
-  $('folder').textContent=r.folder.split(/[\\/]/).filter(Boolean).pop()+' · '+items.length+' photos';$('folder').title=r.folder;
+  const r=await api('/api/items');opts=r.options;VERSION=r.version;FROZEN=r.frozen;PILLOW=r.pillow;
+  if(r.no_batch){items=[];clearTimeout(scanT);scanT=null;showWelcome(r);return}
+  document.body.classList.remove('nobatch');items=r.items;window._dropped=r.dropped;
+  $('folder').textContent=r.folder.split(/[\\/]/).filter(Boolean).pop()+' · '+items.length+' photos'+(r.only?' picked from this folder':'');$('folder').title=r.folder;
   render();showScan(r.scan);
   if(!r.scan.ready&&!scanT)watchScan();
 }
 window.addEventListener('beforeunload',()=>{if(dirty)save()});
+window.addEventListener('pagehide',()=>{try{navigator.sendBeacon('/api/bye','')}catch(e){}});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)fetch('/api/ping').catch(()=>{})});
 setInterval(()=>fetch('/api/ping').catch(()=>{}),20000);
-(async()=>{fill();try{await load();note('Ready · '+counts());await loadSites();checkUpdate(false);
+(async()=>{fill();try{await load();if(items.length)note('Ready · '+counts());await loadSites();checkUpdate(false);
   const st=await api('/api/status');if(st.running){poll=setInterval(status,1000);status()}}catch(e){note(e.message)}})();
 </script></body></html>"""
 
 
-class App:
-    """What the web page talks to."""
+# --------------------------------------------------------------------------
+# Opening batches: recent folders, choosing a folder, and photos dropped in
+# --------------------------------------------------------------------------
 
-    def __init__(self, batch):
-        self.batch = batch
-        self.uploader = Uploader(batch)
+def drop_root():
+    """Where photos dragged onto the page are copied: Pictures/StockUp Batches."""
+    pics = os.path.join(os.path.expanduser("~"), "Pictures")
+    base = pics if os.path.isdir(pics) else os.path.expanduser("~")
+    return os.path.join(base, "StockUp Batches")
+
+
+def in_drop_root(folder):
+    root = os.path.abspath(drop_root())
+    return os.path.abspath(folder).startswith(root + os.sep)
+
+
+def new_drop_folder():
+    root = drop_root()
+    os.makedirs(root, exist_ok=True)
+    name = f"Batch {datetime.now():%Y-%m-%d %H.%M}"
+    path, n = os.path.join(root, name), 2
+    while os.path.exists(path):
+        path, n = os.path.join(root, f"{name} ({n})"), n + 1
+    os.makedirs(path)
+    return path
+
+
+def clean_photo_name(name):
+    """A dropped file's own name (never a path), and only JPEGs."""
+    name = os.path.basename(str(name).replace("\\", "/")).strip()
+    name = "".join(ch for ch in name if ch >= " " and ch not in '<>:"|?*')
+    if not name or name.startswith(".") or not name.lower().endswith(IMAGE_EXT):
+        return ""
+    return name
+
+
+def save_dropped(folder, name, read_chunk, size):
+    """Write one dropped photo into a batch folder. Never overwrites: an identical file is
+    left as it is, a different file with the same name gets ' (2)' added."""
+    name = clean_photo_name(name)
+    if not name:
+        return {"skipped": "not a JPEG"}
+    if size > 1024 ** 3:
+        return {"skipped": "bigger than 1 GB"}
+    tmp = os.path.join(folder, f".incoming-{os.getpid()}-{threading.get_ident()}.part")
+    h, left = hashlib.sha256(), size
+    try:
+        with open(tmp, "wb") as fh:
+            while left > 0:
+                chunk = read_chunk(min(left, 1 << 20))
+                if not chunk:
+                    raise IOError("the file didn't arrive completely")
+                fh.write(chunk)
+                h.update(chunk)
+                left -= len(chunk)
+        digest = h.hexdigest()
+        stem, ext = os.path.splitext(name)
+        target, n = os.path.join(folder, name), 2
+        while os.path.exists(target):
+            if file_sha256(target) == digest:
+                os.remove(tmp)
+                return {"saved": os.path.basename(target), "same": True}
+            target, n = os.path.join(folder, f"{stem} ({n}){ext}"), n + 1
+        os.replace(tmp, target)
+        return {"saved": os.path.basename(target)}
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _search_roots():
+    """Places a dropped folder or photo is likely to be, most likely first."""
+    home = os.path.expanduser("~")
+    roots = []
+    for f in load_options()["recent"]:
+        roots += [f, os.path.dirname(f)]
+    for name in ("Pictures", "Desktop", "Downloads", "Documents", "Dropbox", "Google Drive",
+                 "OneDrive", "iCloud Drive"):
+        roots.append(os.path.join(home, name))
+    roots += [os.path.join(home, n) for n in sorted(os.listdir(home)) if n.startswith("OneDrive")] \
+        if os.path.isdir(home) else []
+    roots.append(os.path.join(home, "Library", "Mobile Documents", "com~apple~CloudDocs"))
+    if sys.platform == "darwin" and os.path.isdir("/Volumes"):
+        roots += [os.path.join("/Volumes", v) for v in sorted(os.listdir("/Volumes"))]
+    if os.name == "nt":
+        roots += [f"{d}:\\" for d in "DEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{d}:\\")]
+    roots.append(home)
+    seen, out = set(), []
+    for r in roots:
+        r = os.path.abspath(r)
+        if r not in seen and os.path.isdir(r):
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+_SKIP_DIRS = {"library", "appdata", "node_modules", "$recycle.bin", "system volume information",
+              "windows", "program files", "program files (x86)", "applications", OUT_NAME}
+_SKIP_SUFFIX = (".photoslibrary", ".lrdata", ".app", ".photolibrary", ".aplibrary")
+
+
+def locate_dropped(folder_name, files, budget_seconds=4.0, max_dirs=40000):
+    """Find where dropped photos already live on this computer, so they can be opened in
+    place instead of copied. files: [{"name", "size", "mtime" (ms)}] - the browser tells us
+    these, but not the folder. Returns (folder, only) or (None, None). Every photo must
+    match by name and size (and date, when the browser gave one)."""
+    want = {}
+    for f in files:
+        n = clean_photo_name(f.get("name", ""))
+        if n:
+            want[n] = (int(f.get("size", -1)), float(f.get("mtime", 0)) / 1000.0)
+    if not want:
+        return None, None
+
+    def matches(d):
+        for n, (size, mtime) in want.items():
+            try:
+                st = os.stat(os.path.join(d, n))
+            except OSError:
+                return False
+            if st.st_size != size or (mtime and abs(st.st_mtime - mtime) > 2.5):
+                return False
+        return True
+
+    end, visited = time.time() + budget_seconds, 0
+    for root in _search_roots():
+        for d, subdirs, _ in os.walk(root):
+            visited += 1
+            if visited > max_dirs or time.time() > end:
+                return None, None
+            subdirs[:] = [s for s in subdirs if not s.startswith(".")
+                          and s.lower() not in _SKIP_DIRS and not s.lower().endswith(_SKIP_SUFFIX)]
+            if folder_name and os.path.basename(d) != folder_name:
+                continue
+            if matches(d):
+                jpgs = {x for x in os.listdir(d) if x.lower().endswith(IMAGE_EXT) and not x.startswith(".")}
+                return d, (None if jpgs == set(want) else sorted(want))
+    return None, None
+
+
+def import_paths(paths):
+    """Folders or photos dropped on the app's icon. A folder, or photos from one folder, open
+    right where they are. Only photos gathered from several places are copied into a new
+    batch folder (your originals stay where they are). Returns (folder, only)."""
+    dirs = [p for p in paths if os.path.isdir(p)]
+    if len(dirs) == 1 and len(paths) == 1:
+        return dirs[0], None
+    photos = [p for p in paths if os.path.isfile(p) and clean_photo_name(p)]
+    if photos and not dirs and len({os.path.dirname(p) for p in photos}) == 1:
+        return os.path.dirname(photos[0]), sorted(os.path.basename(p) for p in photos)
+    files = []
+    for p in paths:
+        if os.path.isdir(p):
+            for root, _, names in os.walk(p):
+                files += [os.path.join(root, n) for n in sorted(names)]
+        elif os.path.isfile(p):
+            files.append(p)
+    files = [f for f in files if clean_photo_name(f)]
+    if not files:
+        return "", None
+    folder = new_drop_folder()  # photos from several places: gathered into one batch
+    for f in files:
+        with open(f, "rb") as fh:
+            save_dropped(folder, os.path.basename(f), fh.read, os.path.getsize(f))
+    return folder, None
+
+
+def remember_recent(folder):
+    recent = [f for f in load_options()["recent"] if f != folder]
+    save_options({"recent": [folder] + recent[:9]})
+
+
+def recent_batches():
+    out = []
+    for f in load_options()["recent"]:
+        if not os.path.isdir(f):
+            continue
+        try:
+            n = sum(1 for x in os.listdir(f) if x.lower().endswith(IMAGE_EXT) and not x.startswith("."))
+            when = os.path.getmtime(os.path.join(f, STATE_NAME)) if os.path.exists(
+                os.path.join(f, STATE_NAME)) else os.path.getmtime(f)
+        except OSError:
+            continue
+        out.append({"folder": f, "name": os.path.basename(f.rstrip("/\\")) or f, "photos": n,
+                    "when": datetime.fromtimestamp(when).strftime("%b %d, %Y"),
+                    "dropped": in_drop_root(f)})
+    return out
+
+
+def ask_for_folder():
+    """Your computer's own 'choose a folder' window. Runs as a separate process, because
+    macOS only allows those windows from a program's main thread."""
+    import subprocess
+    try:
+        if sys.platform == "darwin":
+            r = subprocess.run(["osascript", "-e", "activate", "-e",
+                                'POSIX path of (choose folder with prompt '
+                                '"Choose the folder with this batch of photos")'],
+                               capture_output=True, text=True, timeout=3600)
+            return r.stdout.strip() if r.returncode == 0 else ""
+        out = os.path.join(CONF_DIR, f"_picked_{os.getpid()}.txt")
+        args = [sys.executable] + ([] if FROZEN else [os.path.abspath(__file__)]) + ["--pick-folder", out]
+        subprocess.run(args, timeout=3600)
+        try:
+            with open(out, encoding="utf-8") as fh:
+                return fh.read().strip()
+        finally:
+            if os.path.exists(out):
+                os.remove(out)
+    except Exception:
+        return ""
+
+
+class App:
+    """What the web page talks to. A batch may or may not be open."""
+
+    def __init__(self, batch=None):
+        self.batch, self.uploader = None, None
         self.build_state = {"running": False, "done": 0, "total": 0, "current": "",
                             "result": None, "error": None}
+        self.drops = {}  # upload tokens -> the batch folder they write into
         self.last_ping = time.time()
+        self.closed_at = None  # when the page said it was closing
+        if batch:
+            self.set_batch(batch)
+
+    def busy(self):
+        return bool((self.uploader and self.uploader.running) or self.build_state["running"])
+
+    def set_batch(self, batch):
+        self.batch, self.uploader = batch, Uploader(batch)
+        self.build_state.update(running=False, done=0, total=0, current="", result=None, error=None)
+        remember_recent(batch.folder)
+
+    def open(self, folder, only=None):
+        if self.busy():
+            raise RuntimeError("Wait for the current upload or file-making to finish first.")
+        folder = os.path.abspath(os.path.expanduser(str(folder).strip().strip('"').strip("'")))
+        if not os.path.isdir(folder):
+            raise RuntimeError(f"That folder doesn't exist: {folder}")
+        only = [clean_photo_name(n) for n in only] if only else None
+        self.set_batch(Batch(folder, background=True, only=[n for n in only if n] if only else None))
+
+    def close(self):
+        if self.busy():
+            raise RuntimeError("Wait for the current upload or file-making to finish first.")
+        self.batch, self.uploader = None, None
+
+    def status(self):
+        return self.uploader.status() if self.uploader else {"running": False, "sites": {}}
 
     def start_build(self):
         if self.build_state["running"]:
             return
         self.build_state.update(running=True, done=0, total=0, current="", result=None, error=None)
+        batch = self.batch
 
         def prog(d, t, cur):
             self.build_state.update(done=d, total=t, current=cur)
 
         def run():
             try:
-                self.build_state["result"] = build_outputs(self.batch, prog)
+                self.build_state["result"] = build_outputs(batch, prog)
             except Exception as e:
                 self.build_state["error"] = str(e)
             self.build_state["running"] = False
         threading.Thread(target=run, daemon=True).start()
 
 
-def make_handler(app):
-    batch = app.batch
+NEEDS_BATCH = {"/api/scan", "/api/save", "/api/autocats", "/api/fix", "/api/build", "/api/preview",
+               "/api/upload", "/api/send_sheet"}
 
+
+def make_handler(app):
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
 
-        def _send(self, code, body, ctype="application/json"):
+        def _send(self, code, body, ctype="application/json", cache=False):
             if isinstance(body, (dict, list)):
                 body = json.dumps(body).encode()
             elif isinstance(body, str):
@@ -3204,7 +3618,9 @@ def make_handler(app):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            # thumbnails are kept by the browser (their address changes if the photo does);
+            # everything else is always fresh
+            self.send_header("Cache-Control", "private, max-age=86400" if cache else "no-store")
             self.end_headers()
             self.wfile.write(body)
 
@@ -3237,7 +3653,10 @@ def make_handler(app):
             u = urlparse(self.path)
             p = u.path
             app.last_ping = time.time()
+            batch = app.batch
             try:
+                if p in NEEDS_BATCH and not batch:
+                    return self._send(200, {"error": "Open a batch first."})
                 if p == "/":
                     page = PAGE.replace("__SS__", json.dumps(SHUTTERSTOCK_CATEGORIES)) \
                         .replace("__AD__", json.dumps({str(k): v for k, v in ADOBE_CATEGORIES.items()})) \
@@ -3249,8 +3668,15 @@ def make_handler(app):
                     return self._send(200, page, "text/html; charset=utf-8")
                 if p == "/api/scan":
                     return self._send(200, batch.scan)
+                if p == "/api/items" and not batch:
+                    return self._send(200, {"no_batch": True, "recent": recent_batches(),
+                                            "drop_root": drop_root(), "options": load_options(),
+                                            "version": VERSION, "frozen": FROZEN,
+                                            "pillow": have_pillow()})
                 if p == "/api/items":
                     return self._send(200, {"folder": batch.folder, "items": batch.items(),
+                                            "dropped": in_drop_root(batch.folder),
+                                            "only": bool(batch.only),
                                             "scan": batch.scan,
                                             "options": load_options(), "version": VERSION,
                                             "frozen": FROZEN, "pillow": have_pillow()})
@@ -3259,10 +3685,11 @@ def make_handler(app):
                 if p == "/api/logins":
                     return self._send(200, logins_summary())
                 if p == "/api/status":
-                    return self._send(200, app.uploader.status())
+                    return self._send(200, app.status())
                 if p == "/api/build_status":
                     return self._send(200, app.build_state)
                 if p == "/api/ping":
+                    app.closed_at = None
                     return self._send(200, {"ok": True})
                 if p == "/api/version":
                     force = "force=1" in u.query
@@ -3274,9 +3701,9 @@ def make_handler(app):
                         return self._send(200, {"current": VERSION, "available": False})
                 if p.startswith("/thumb/"):
                     f = unquote(p[len("/thumb/"):])
-                    if f not in batch.meta:
+                    if not batch or f not in batch.meta:
                         return self._send(404, "not found", "text/plain")
-                    return self._send(200, batch.thumbnail(f), "image/jpeg")
+                    return self._send(200, batch.thumbnail(f), "image/jpeg", cache=True)
             except Exception as e:
                 return self._send(500, {"error": str(e)})
             self._send(404, "not found", "text/plain")
@@ -3284,15 +3711,61 @@ def make_handler(app):
         def do_POST(self):
             if not self._same_origin():
                 return
-            p = urlparse(self.path).path
+            u = urlparse(self.path)
+            p = u.path
+            batch = app.batch
             try:
+                if p == "/api/drop/file":  # a photo's bytes, sent straight from the page
+                    q = dict(x.split("=", 1) for x in u.query.split("&") if "=" in x)
+                    folder = app.drops.get(q.get("token", ""))
+                    if not folder:
+                        return self._send(400, {"error": "This drop has expired. Drop the photos again."})
+                    size = int(self.headers.get("Content-Length", 0) or 0)
+                    return self._send(200, save_dropped(folder, unquote(q.get("name", "")),
+                                                        self.rfile.read, size))
                 body = self._json()
+                if p in NEEDS_BATCH and not batch:
+                    return self._send(200, {"error": "Open a batch first."})
+                if p == "/api/open":
+                    app.open(body.get("folder", ""), body.get("only"))
+                    return self._send(200, {"ok": True})
+                if p == "/api/drop/locate":
+                    folder, only = locate_dropped(str(body.get("folder_name") or ""),
+                                                  body.get("files") or [])
+                    return self._send(200, {"folder": folder, "only": only})
+                if p == "/api/pick_folder":
+                    if app.busy():
+                        return self._send(200, {"error": "Wait for the current upload to finish first."})
+                    folder = ask_for_folder()
+                    if not folder:
+                        return self._send(200, {"cancelled": True})
+                    app.open(folder)
+                    return self._send(200, {"ok": True})
+                if p == "/api/drop/start":
+                    if app.busy():
+                        return self._send(200, {"error": "Wait for the current upload to finish first."})
+                    adding = bool(body.get("add")) and batch and in_drop_root(batch.folder)
+                    folder = batch.folder if adding else new_drop_folder()
+                    token = secrets.token_hex(16)
+                    app.drops[token] = folder
+                    return self._send(200, {"token": token, "folder": folder, "adding": bool(adding)})
+                if p == "/api/drop/finish":
+                    folder = app.drops.pop(body.get("token", ""), None)
+                    if not folder:
+                        return self._send(200, {"error": "This drop has expired."})
+                    if not any(f.lower().endswith(IMAGE_EXT) for f in os.listdir(folder)):
+                        if not os.listdir(folder):
+                            os.rmdir(folder)  # nothing came in: don't leave an empty folder
+                        return self._send(200, {"error": "None of those were JPEG photos."})
+                    app.open(folder)
+                    return self._send(200, {"ok": True, "folder": folder})
                 if p in ("/api/build", "/api/preview", "/api/upload") and not batch.scan["ready"]:
                     return self._send(200, {"error": f"StockUp is still checking your photos "
                                                      f"({batch.scan['done']} of {batch.scan['total']}). "
                                                      f"Try again in a moment."})
                 if p == "/api/pause":
-                    app.uploader.pause(body.get("paused"))
+                    if app.uploader:
+                        app.uploader.pause(body.get("paused"))
                     return self._send(200, {"ok": True})
                 if p == "/api/save":
                     batch.save(body)
@@ -3307,8 +3780,8 @@ def make_handler(app):
                     before = load_options()
                     opts = save_options(body)
                     rules = ("editorial_keyword", "editorial_label", "flag_formatted")
-                    n = batch.reapply_auto() if any(before[k] != opts[k] for k in rules) else 0
-                    if opts["auto_categories"] and not before["auto_categories"]:
+                    n = batch.reapply_auto() if batch and any(before[k] != opts[k] for k in rules) else 0
+                    if batch and opts["auto_categories"] and not before["auto_categories"]:
                         with batch.lock:
                             for f in batch.files:
                                 batch._autofill(f, batch.state[f], overwrite=False)
@@ -3326,7 +3799,8 @@ def make_handler(app):
                     return self._send(200, upload_preview(
                         batch, [n for n in body.get("sites", []) if n in ready]))
                 if p == "/api/stop":
-                    app.uploader.stop()
+                    if app.uploader:
+                        app.uploader.stop()
                     return self._send(200, {"ok": True})
                 if p == "/api/send_sheet":
                     return self._send(200, send_sheet(batch, body.get("site", "")))
@@ -3342,23 +3816,25 @@ def make_handler(app):
                     save_options({"upload_sites": pick})
                     return self._send(200, {"started": app.uploader.start(only=pick)})
                 if p == "/api/update":
-                    if app.uploader.running:
+                    if app.busy():
                         return self._send(200, {"updated": False,
                                                 "message": "Wait for the upload to finish, then update."})
                     r = install_update()
                     self._send(200, r)
                     if r.get("updated"):
-                        restart_program(self.server, batch.folder)
+                        restart_program(self.server, batch.folder if batch else None)
                     return
                 if p == "/api/another":
-                    if app.uploader.running:
+                    if app.busy():
                         return self._send(200, {"ok": False,
                                                 "message": "Wait for the upload to finish first."})
-                    self._send(200, {"ok": True})
-                    restart_program(self.server, None)
-                    return
+                    app.close()
+                    return self._send(200, {"ok": True})
+                if p == "/api/bye":  # the page is closing (or reloading)
+                    app.closed_at = time.time()
+                    return self._send(200, {"ok": True})
                 if p == "/api/quit":
-                    if app.uploader.running and not body.get("force"):
+                    if app.busy() and not body.get("force"):
                         return self._send(200, {"ok": False, "message":
                                                 "An upload is still running. Quit anyway?"})
                     self._send(200, {"ok": True})
@@ -3434,6 +3910,14 @@ def self_test(out_path):
 
 
 def main(argv):
+    if len(argv) > 1 and argv[1] == "--pick-folder":  # the folder window, run by ask_for_folder
+        folder = pick_folder()
+        if len(argv) > 2:
+            with open(argv[2], "w", encoding="utf-8") as fh:
+                fh.write(folder or "")
+        else:
+            print(folder or "")
+        return 0
     if len(argv) > 1 and argv[1] == "--selftest":
         return self_test(argv[2] if len(argv) > 2 else "selftest.txt")
     if len(argv) > 1 and argv[1] in ("-h", "--help"):
@@ -3459,14 +3943,15 @@ def main(argv):
             print("Update failed:", e)
             return 1
         return 0
-    folder = (args[1] if len(args) > 1 else "") if cmd in ("build", "upload") \
-        else (cmd or pick_folder())
-    if not folder or not os.path.isdir(folder):
-        print(f"Not a folder: {folder or '(none chosen)'}")
-        return 1
     load_sites()
+    if cmd not in ("build", "upload"):
+        return serve(args)
+    folder = args[1] if len(args) > 1 else ""
+    if not os.path.isdir(folder):
+        print(f"Not a folder: {folder or '(none given)'}")
+        return 1
     print("Reading your photos…", end=" ", flush=True)
-    batch = Batch(folder, background=cmd not in ("build", "upload"))
+    batch = Batch(folder)
     print(f"{len(batch.files)} JPEGs found.")
     if cmd == "build":
         r = build_outputs(batch)
@@ -3495,7 +3980,19 @@ def main(argv):
                 print(f"  {n}: {e}")
         return 0
 
-    app = App(batch)
+
+def serve(paths):
+    """Open the page. With no folder, it starts on the welcome screen. Folders or photos
+    dropped on the app's icon (or given on the command line) open straight away."""
+    app = App()
+    if paths:
+        folder, only = import_paths([os.path.abspath(p) for p in paths])
+        if folder:
+            print("Reading your photos…", end=" ", flush=True)
+            app.open(folder, only)
+            print(f"{len(app.batch.files)} JPEGs found.")
+        else:
+            print("No JPEG photos found in what was given; opening the welcome screen.")
     restarting = os.environ.pop("STOCKUP_PORT", "")
     port = int(restarting) if restarting.isdigit() else 0
     server = None
@@ -3518,8 +4015,11 @@ def main(argv):
         def watchdog():
             while True:
                 time.sleep(30)
-                if time.time() - app.last_ping > 180 and not app.uploader.running \
-                        and not app.build_state["running"]:
+                # Quit a minute after the page is closed. A browser may freeze a background
+                # tab for a long time, so silence alone only counts after 6 hours.
+                closed = app.closed_at and app.closed_at >= app.last_ping - 1 \
+                    and time.time() - app.closed_at > 60
+                if (closed or time.time() - app.last_ping > 6 * 3600) and not app.busy():
                     os._exit(0)
         threading.Thread(target=watchdog, daemon=True).start()
     try:
