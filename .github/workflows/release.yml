@@ -153,6 +153,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
         run: |
-          gh release create "$TAG" stockup.py apps/StockUp-Mac.zip apps/StockUp-Windows.zip \
+          cp stockup.py apps/
+          # fingerprints of every file: StockUp's updater refuses anything that doesn't match
+          (cd apps && sha256sum StockUp-Mac.zip StockUp-Windows.zip stockup.py > SHA256SUMS && cat SHA256SUMS)
+          gh release create "$TAG" apps/stockup.py apps/StockUp-Mac.zip apps/StockUp-Windows.zip apps/SHA256SUMS \
             --target "$GITHUB_SHA" --title "StockUp ${TAG#v}" \
             --notes-file .github/release-notes.md

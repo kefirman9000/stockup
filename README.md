@@ -52,7 +52,8 @@ StockUp's window uses the page engine built into your computer: Safari's on a Ma
 - **Keeps your passwords in your computer's keychain:** Keychain on Mac, Credential Manager on Windows.
 - **Its own window, quick to open.** No browser needed, and it closes like any other app (it asks first if an upload is still running).
 - **Opens without a folder.** A welcome screen lists your recent batches, and **Another batch** switches batches without restarting.
-- **Light and dark mode,** and an **Update** button when a new version is out.
+- **Updates itself when you say so.** When a new version is out, a banner offers **Update now**. StockUp downloads it, checks it against the fingerprint published with the release, installs it, keeps your current version as a backup, and reopens on the batch you had open.
+- **Light and dark mode.**
 
 | Check photos | One photo, site by site |
 |---|---|
@@ -133,6 +134,19 @@ These come from each site's contributor help pages. Sites change their rules, so
 - **Dreamstime's username** is the user ID number shown on its FTP page, not your email.
 - **Pond5** uses a separate FTP password, which you set in Pond5's *Dashboard › Account › FTP*.
 - **Photos must be JPEGs** with titles and keywords saved in them, the way Lightroom, Bridge, Photo Mechanic and most keywording tools save them.
+
+## Updates
+
+When a new version is released, StockUp shows a banner. Click **Update now** and StockUp:
+
+1. downloads the new version, showing its progress;
+2. checks it against the SHA-256 fingerprint published with the release, and refuses anything that doesn't match exactly;
+3. unpacks it and checks that it really is the new version;
+4. once StockUp has closed, swaps the new version in, keeps the old one as a backup, and reopens StockUp on the batch you had open.
+
+If anything goes wrong along the way, your current version is left exactly as it was. StockUp won't update in the middle of an upload.
+
+StockUp can't replace itself in two situations, and tells you if so. On a Mac, it has to be run from your Applications folder: macOS runs apps still sitting in the folder they were unzipped to from a temporary read-only copy. And it can't update itself in a folder you don't have permission to change. The banner then offers a **Download** button instead.
 
 ## Tested on every release
 
