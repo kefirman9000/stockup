@@ -57,7 +57,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install build tools
-        run: python -m pip install pyinstaller pillow keyring paramiko
+        run: python -m pip install pyinstaller pillow keyring paramiko pywebview
+
       - name: Build (Mac)
         if: runner.os == 'macOS'
         run: |
@@ -67,16 +68,72 @@ jobs:
           ./dist/StockUp.app/Contents/MacOS/StockUp --selftest selftest.txt || (cat selftest.txt; exit 1)
           cat selftest.txt
           ditto -c -k --keepParent dist/StockUp.app "${{ matrix.zip }}"
+      - name: Open the real window and time it (Mac)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          for run in first second; do
+            rm -f window.txt
+            t0=$(python3 -c 'import time; print(time.time())')
+            STOCKUP_WINDOW_CHECK="$PWD/window.txt" ./dist/StockUp.app/Contents/MacOS/StockUp &
+            pid=$!
+            for i in $(seq 1 180); do [ -s window.txt ] && break; sleep 0.25; done
+            t1=$(python3 -c 'import time; print(time.time())')
+            sleep 1; kill $pid 2>/dev/null || true
+            cat window.txt || true
+            took=$(python3 -c "print(f'{$t1-$t0:.1f}')")
+            if grep -q "window: ok" window.txt 2>/dev/null; then
+              echo "::notice title=Startup on Mac ($run launch)::StockUp's window showed the page ${took}s after double-click"
+            else
+              echo "::warning title=Window on Mac ($run launch)::The window didn't show the page within 45s"
+            fi
+          done
+
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name StockUp `
+          # a folder app: starts directly, instead of unpacking itself on every launch
+          pyinstaller --noconfirm --windowed --name StockUp `
             --copy-metadata keyring --hidden-import keyring.backends.Windows stockup.py
-          $p = Start-Process -FilePath dist\StockUp.exe -ArgumentList '--selftest','selftest.txt' -Wait -PassThru
+          $p = Start-Process -FilePath dist\StockUp\StockUp.exe -ArgumentList '--selftest','selftest.txt' -Wait -PassThru
           Get-Content selftest.txt
           if ($p.ExitCode -ne 0) { exit 1 }
-          Compress-Archive -Path dist\StockUp.exe -DestinationPath "${{ matrix.zip }}"
+          Compress-Archive -Path dist\StockUp -DestinationPath "${{ matrix.zip }}"
+      - name: Compare with the old single-file build (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name StockUpOneFile --distpath dist1 --workpath build1 `
+            --copy-metadata keyring --hidden-import keyring.backends.Windows stockup.py | Out-Null
+          foreach ($exe in @("dist\StockUp\StockUp.exe", "dist1\StockUpOneFile.exe")) {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            Start-Process -FilePath $exe -ArgumentList '--selftest','t.txt' -Wait | Out-Null
+            $s = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+            echo "::notice title=Windows start-up ($exe)::Started and checked itself in ${s}s"
+          }
+      - name: Open the real window and time it (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          foreach ($run in @("first", "second")) {
+            Remove-Item window.txt -ErrorAction SilentlyContinue
+            $env:STOCKUP_WINDOW_CHECK = "$PWD\window.txt"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $p = Start-Process -FilePath dist\StockUp\StockUp.exe -PassThru
+            while (-not (Test-Path window.txt) -and $sw.Elapsed.TotalSeconds -lt 45) { Start-Sleep -Milliseconds 200 }
+            Start-Sleep -Milliseconds 300
+            $s = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+            Get-Content window.txt -ErrorAction SilentlyContinue
+            if ((Get-Content window.txt -ErrorAction SilentlyContinue) -match "window: ok") {
+              echo "::notice title=Startup on Windows ($run launch)::StockUp's window showed the page ${s}s after double-click"
+            } else {
+              echo "::warning title=Window on Windows ($run launch)::The window didn't show the page within 45s"
+            }
+            Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.zip }}

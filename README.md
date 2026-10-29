@@ -21,17 +21,19 @@ Get the newest version from the **[Releases page](../../releases/latest)**:
 | Intel Mac, Linux, or you'd rather use Python | `stockup.py` (see [Running the script](#running-the-script)) |
 
 **First time opening it**
-- **Mac:** unzip, drag **StockUp** to Applications, then right-click it and choose **Open**. macOS asks this once because the app isn't from the App Store. If it still won't open, go to *System Settings › Privacy & Security* and click **Open Anyway**.
-- **Windows:** unzip and double-click **StockUp**. If a blue "Windows protected your PC" box appears, click **More info › Run anyway**.
+- **Mac:** unzip, drag **StockUp** to Applications, then right-click it and choose **Open**. macOS asks this once because the app isn't from the App Store. If it still won't open, go to *System Settings › Privacy & Security* and click **Open Anyway**. The very first launch is a little slower while macOS checks the app; after that it opens quickly.
+- **Windows:** unzip, open the **StockUp** folder and double-click **StockUp.exe**. Keep the folder together: StockUp.exe needs the files beside it. You can pin it to Start or the taskbar. If a blue "Windows protected your PC" box appears, click **More info › Run anyway**.
 
-StockUp opens in your web browser. Drag photos or a folder onto it, choose a folder, or pick one of your recent batches. Nothing is sent anywhere until you click **Upload**.
+StockUp opens in its own window. Drag photos or a folder onto it, choose a folder, or pick one of your recent batches. Nothing is sent anywhere until you click **Upload**.
 
 ![The welcome screen](screenshots/welcome-dark.png)
 
 **Three ways to open a batch**
-- **Drag photos or a folder onto the page.** StockUp first looks for them on your computer: in your recent batches, Pictures, Desktop, Downloads, Documents, cloud folders and external drives. If it finds them, they open right where they are and nothing is copied. A browser never tells a page where dropped files live, so if StockUp can't find them, it copies them into a new folder in *Pictures › StockUp Batches* and leaves your originals where they were.
-- **Choose a folder…** opens your folder directly, with nothing copied.
-- **Drop a folder or photos onto the StockUp app icon,** in the Dock or Finder on a Mac, or on StockUp.exe on Windows. These open in place too.
+- **Drag photos or a folder onto StockUp's window.** They open right where they are; nothing is copied. The only exception is photos dragged from several different folders at once: those are gathered into a new folder in *Pictures › StockUp Batches*, and your originals stay where they were.
+- **Choose a folder…** or **Choose photos…** use your computer's own open window.
+- **Drop a folder or photos onto the StockUp app icon,** in the Dock or Finder on a Mac, or on StockUp.exe on Windows.
+
+StockUp's window uses the page engine built into your computer: Safari's on a Mac, and Edge's (WebView2) on Windows 10 and 11. On the rare computer without it, StockUp opens in your web browser instead and works the same way. In the browser, dragged-in photos are found on your computer when possible and copied only if they can't be found.
 
 ## What it does for you
 
@@ -48,6 +50,7 @@ StockUp opens in your web browser. Drag photos or a folder onto it, choose a fol
 - **Shuffles the upload order** and keeps look-alike photos apart, so reviewers don't see a run of near-identical frames. Each site gets its own order.
 - **Fills in Dreamstime too:** titles, keywords, up to three categories, and the editorial flag, sent to Dreamstime with one button.
 - **Keeps your passwords in your computer's keychain:** Keychain on Mac, Credential Manager on Windows.
+- **Its own window, quick to open.** No browser needed, and it closes like any other app (it asks first if an upload is still running).
 - **Opens without a folder.** A welcome screen lists your recent batches, and **Another batch** switches batches without restarting.
 - **Light and dark mode,** and an **Update** button when a new version is out.
 
@@ -145,11 +148,11 @@ python -m pytest
 If you'd rather not use the app, install [Python](https://www.python.org/downloads/), download `stockup.py`, and run it:
 
 ```
-pip install pillow keyring paramiko      optional extras: fixes, keychain, Adobe SFTP
-python stockup.py                        then choose your batch folder
+pip install pillow keyring paramiko pywebview   optional extras: fixes, keychain, Adobe SFTP, own window
+python stockup.py
 ```
 
-On a Mac, use `python3`, and once after installing Python, run *Applications › Python 3 › Install Certificates*. The script updates itself from the **Update now** button.
+On a Mac, use `python3`, and once after installing Python, run *Applications › Python 3 › Install Certificates*. Without pywebview, the script opens in your web browser. To use the browser even when pywebview is installed, set `STOCKUP_BROWSER=1`. The script updates itself from the **Update now** button.
 
 Other commands:
 
