@@ -1,5 +1,9 @@
-# Publishes a release (with stockup.py attached) whenever the VERSION line in
-# stockup.py changes on main. StockUp's Update button installs the newest one.
+# When the VERSION line in stockup.py changes on main, this builds the Mac and
+# Windows apps, tests them, and publishes a release with:
+#   stockup.py            (for people who run the script; the in-app updater uses it)
+#   StockUp-Mac.zip       (Apple silicon Macs)
+#   StockUp-Windows.zip
+# The release text comes from .github/release-notes.md.
 name: Release
 on:
   push:
@@ -9,22 +13,83 @@ on:
 permissions:
   contents: write
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      new: ${{ steps.v.outputs.new }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -m py_compile stockup.py
+          tag="v$(grep -m1 '^VERSION = ' stockup.py | cut -d'"' -f2)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"; echo "$tag is already released"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  app:
+    needs: version
+    if: needs.version.outputs.new == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            zip: StockUp-Mac.zip
+          - os: windows-latest
+            zip: StockUp-Windows.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tools
+        run: python -m pip install pyinstaller pillow keyring paramiko
+      - name: Build (Mac)
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --noconfirm --windowed --name StockUp \
+            --osx-bundle-identifier io.github.kefirman9000.stockup \
+            --copy-metadata keyring --hidden-import keyring.backends.macOS stockup.py
+          ./dist/StockUp.app/Contents/MacOS/StockUp --selftest selftest.txt || (cat selftest.txt; exit 1)
+          cat selftest.txt
+          ditto -c -k --keepParent dist/StockUp.app "${{ matrix.zip }}"
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name StockUp `
+            --copy-metadata keyring --hidden-import keyring.backends.Windows stockup.py
+          $p = Start-Process -FilePath dist\StockUp.exe -ArgumentList '--selftest','selftest.txt' -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+          Compress-Archive -Path dist\StockUp.exe -DestinationPath "${{ matrix.zip }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.zip }}
+          path: ${{ matrix.zip }}
+
   release:
+    needs: [version, app]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Read the version
-        id: v
-        run: |
-          python3 -m py_compile stockup.py
-          echo "tag=v$(grep -m1 '^VERSION = ' stockup.py | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
-      - name: Publish the release if it's new
+      - uses: actions/download-artifact@v4
+        with:
+          path: apps
+          merge-multiple: true
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.v.outputs.tag }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "$TAG is already released"; exit 0
-          fi
-          gh release create "$TAG" stockup.py --target "$GITHUB_SHA" \
-            --title "StockUp ${TAG#v}" --notes-file .github/release-notes.md
+          gh release create "$TAG" stockup.py apps/StockUp-Mac.zip apps/StockUp-Windows.zip \
+            --target "$GITHUB_SHA" --title "StockUp ${TAG#v}" \
+            --notes-file .github/release-notes.md
