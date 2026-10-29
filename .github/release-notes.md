@@ -1,15 +1,10 @@
-**1.5.1: gentler adjusted copies**
+**New in 1.6: StockUp has its own window**
+- **No browser needed.** StockUp now opens in its own window, using the page engine built into your computer (Safari's on a Mac, Edge's on Windows 10 and 11). It looks and works the same, has its own Dock or taskbar icon, and closes like any other app. If an upload is running, it asks before quitting.
+- **Drag and drop opens photos where they are, always.** In StockUp's window, dragged-in photos and folders come with their real locations, so nothing is copied. The one exception is photos dragged from several folders at once, which are gathered into a new batch folder.
+- **Choose a folder… and Choose photos…** now use your computer's own open window.
+- **Opens faster.**
+  - **Windows:** the app is now a folder (open it and double-click StockUp.exe). The old single file unpacked about 25 MB to a temporary folder on every launch; now it starts directly.
+  - **Everywhere:** the window opens as soon as StockUp starts, with no waiting for a browser, and passwords are read from your keychain in the background.
+- **Falls back gracefully.** On a computer without the built-in page engine, StockUp opens in your web browser as before.
 
-This only matters if you've chosen "Let StockUp make adjusted copies". In the default exact-files mode, nothing is ever re-saved.
-
-When StockUp does re-save a photo (sRGB, resize for upload, or a smaller file for a site's limit), the copy is now as faithful as it can be:
-- **Full colour detail.** Copies keep the original's chroma subsampling instead of storing colour at a quarter of the resolution. In testing, a resized copy went from 21.3 dB to 46.6 dB closeness to a perfect resize; fine coloured edges are no longer smeared.
-- **Never lower quality:** copies are saved at quality 95 or the original's own quality, whichever is higher.
-- **Truer colours when converting to sRGB:** relative colorimetric with black point compensation, Photoshop's default.
-- **Black-and-white stays black-and-white** when only resizing.
-- **All metadata carried over,** now including file comments.
-- When a site's file-size limit needs a smaller file, quality steps down gently first, and colour detail is reduced only if that isn't enough.
-
-Copies are larger as a result (about twice the size in testing), still well within every site's limits.
-
-**Downloads:** `StockUp-Mac.zip` (Apple silicon), `StockUp-Windows.zip`, or `stockup.py`. Script users can press **Update now** in StockUp. App users: download the new zip, quit the old app, and open the new one.
+**Downloads:** `StockUp-Mac.zip` (Apple silicon) or `StockUp-Windows.zip` (unzip, open the StockUp folder, double-click StockUp.exe), or `stockup.py`. Script users: `pip install pywebview` for the window, then press **Update now** in StockUp. App users: download the new zip, quit the old app, and open the new one.

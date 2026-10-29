@@ -41,9 +41,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
+STARTED = time.time()
 
 
 def _config_dir():
@@ -1845,16 +1846,23 @@ def build_outputs(batch, progress=None):
 # Logins: usernames in stockup_sites.ini, passwords in the system keychain
 # --------------------------------------------------------------------------
 
+_KEYRING = []          # loaded once: finding the keychain can take a moment
+_PASSWORDS = {}        # read from the keychain once per site, then remembered while running
+_kr_lock = threading.Lock()
+
+
 def _keyring():
-    try:
-        import keyring
-        kr = keyring.get_keyring()
-        name = type(kr).__name__.lower()
-        if "fail" in name or "null" in name or "plaintext" in name:
-            return None
-        return keyring
-    except Exception:
-        return None
+    with _kr_lock:
+        if not _KEYRING:
+            try:
+                import keyring
+                kr = keyring.get_keyring()
+                name = type(kr).__name__.lower()
+                ok = not ("fail" in name or "null" in name or "plaintext" in name)
+                _KEYRING.append(keyring if ok else None)
+            except Exception:
+                _KEYRING.append(None)
+        return _KEYRING[0]
 
 
 def keychain_name():
@@ -1924,6 +1932,7 @@ def load_sites():
             if kr and v["password"]:
                 try:
                     kr.set_password(KEYRING_SERVICE, site, v["password"])
+                    _PASSWORDS[site] = v["password"]
                     v["password"] = ""
                     moved = True
                 except Exception:
@@ -1934,10 +1943,12 @@ def load_sites():
     for site, v in vals.items():
         pw = v["password"]
         if not pw and kr:
-            try:
-                pw = kr.get_password(KEYRING_SERVICE, site) or ""
-            except Exception:
-                pw = ""
+            if site not in _PASSWORDS:
+                try:
+                    _PASSWORDS[site] = kr.get_password(KEYRING_SERVICE, site) or ""
+                except Exception:
+                    _PASSWORDS[site] = ""
+            pw = _PASSWORDS[site]
         ftp = SITES[site]["ftp"]
         proto = (v["protocol"] or ftp["protocol"]).lower()
         try:
@@ -1969,11 +1980,13 @@ def save_logins(changes):
                 if kr:
                     try:
                         kr.delete_password(KEYRING_SERVICE, site)
+                        _PASSWORDS.pop(site, None)
                     except Exception:
                         pass
             elif c.get("password"):
                 if kr:
                     kr.set_password(KEYRING_SERVICE, site, c["password"])
+                    _PASSWORDS[site] = c["password"]
                     v["password"] = ""
                 else:
                     v["password"] = c["password"]
@@ -2805,10 +2818,10 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
 <section id="welcome">
   <div id="dropzone">
     <h2>Drop photos or a folder here</h2>
-    <p class="hint">StockUp opens them right where they are when it can find them on your computer. If it can’t, it copies them into a new batch folder, and your originals stay where they were.</p>
+    <p class="hint" id="dropHint">StockUp opens them right where they are when it can find them on your computer. If it can’t, it copies them into a new batch folder, and your originals stay where they were.</p>
     <div class="choices">
       <button class="primary" onclick="pickFolder()">Choose a folder…</button>
-      <button onclick="$('pickFiles').click()">Choose photos…</button>
+      <button onclick="choosePhotos()">Choose photos…</button>
       <input type="file" id="pickFiles" multiple accept=".jpg,.jpeg,image/jpeg" hidden onchange="filesChosen(this)">
     </div>
     <div class="pathrow"><input id="pathIn" placeholder="…or paste a folder’s location" onkeydown="if(event.key=='Enter')openPath()"><button onclick="openPath()">Open</button></div>
@@ -3328,6 +3341,19 @@ async function openDropped(list,folderName){
   finally{showBusy()}
 }
 const note_txt=()=>$('msg').textContent;
+let NATIVE=false;
+async function choosePhotos(){
+  if(!NATIVE)return $('pickFiles').click();
+  try{const r=await api('/api/pick_photos',{});if(r.ok){sel=new Set();last=null;await load();
+    note(r.in_place?`Opened ${items.length} photo${items.length==1?'':'s'} right where they are — nothing was copied.`:'Opened · '+counts(),true)}}
+  catch(e){alert(e.message)}
+}
+function nativeDropStarted(){dragDepth=0;$('droplay').style.display='none';showBusy('Opening…','',0)}
+async function nativeDropDone(r){
+  showBusy();
+  if(r.error)return alert(r.error);
+  sel=new Set();last=null;await load();note(r.message,true);
+}
 function filesChosen(inp){const list=[...inp.files].map(f=>({file:f,path:f.name}));inp.value='';openDropped(list,'')}
 let dragDepth=0;
 const hasFiles=e=>e.dataTransfer&&[...(e.dataTransfer.types||[])].includes('Files');
@@ -3342,6 +3368,8 @@ window.addEventListener('drop',async e=>{if(!hasFiles(e))return;e.preventDefault
 
 async function load(){
   const r=await api('/api/items');opts=r.options;VERSION=r.version;FROZEN=r.frozen;PILLOW=r.pillow;
+  NATIVE=!!r.native;
+  if(NATIVE)$('dropHint').textContent='They open right where they are on your computer — nothing is copied.';
   if(r.no_batch){items=[];clearTimeout(scanT);scanT=null;showWelcome(r);return}
   document.body.classList.remove('nobatch');items=r.items;window._dropped=r.dropped;
   $('folder').textContent=r.folder.split(/[\\/]/).filter(Boolean).pop()+' · '+items.length+' photos'+(r.only?' picked from this folder':'');$('folder').title=r.folder;
@@ -3352,7 +3380,7 @@ window.addEventListener('beforeunload',()=>{if(dirty)save()});
 window.addEventListener('pagehide',()=>{try{navigator.sendBeacon('/api/bye','')}catch(e){}});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)fetch('/api/ping').catch(()=>{})});
 setInterval(()=>fetch('/api/ping').catch(()=>{}),20000);
-(async()=>{fill();try{await load();if(items.length)note('Ready · '+counts());await loadSites();checkUpdate(false);
+(async()=>{fill();try{await load();fetch('/api/ready').catch(()=>{});if(items.length)note('Ready · '+counts());await loadSites();checkUpdate(false);
   const st=await api('/api/status');if(st.running){poll=setInterval(status,1000);status()}}catch(e){note(e.message)}})();
 </script></body></html>"""
 
@@ -3580,6 +3608,8 @@ class App:
         self.drops = {}  # upload tokens -> the batch folder they write into
         self.last_ping = time.time()
         self.closed_at = None  # when the page said it was closing
+        self.window = None     # StockUp's own window, when there is one
+        self.page_ready_at = None
         if batch:
             self.set_batch(batch)
 
@@ -3695,13 +3725,14 @@ def make_handler(app):
                     return self._send(200, batch.scan)
                 if p == "/api/items" and not batch:
                     return self._send(200, {"no_batch": True, "recent": recent_batches(),
+                                            "native": bool(app.window),
                                             "drop_root": drop_root(), "options": load_options(),
                                             "version": VERSION, "frozen": FROZEN,
                                             "pillow": have_pillow()})
                 if p == "/api/items":
                     return self._send(200, {"folder": batch.folder, "items": batch.items(),
                                             "dropped": in_drop_root(batch.folder),
-                                            "only": bool(batch.only),
+                                            "only": bool(batch.only), "native": bool(app.window),
                                             "scan": batch.scan,
                                             "options": load_options(), "version": VERSION,
                                             "frozen": FROZEN, "pillow": have_pillow()})
@@ -3715,6 +3746,9 @@ def make_handler(app):
                     return self._send(200, app.build_state)
                 if p == "/api/ping":
                     app.closed_at = None
+                    return self._send(200, {"ok": True})
+                if p == "/api/ready":  # the page has drawn itself
+                    app.page_ready_at = app.page_ready_at or time.time()
                     return self._send(200, {"ok": True})
                 if p == "/api/version":
                     force = "force=1" in u.query
@@ -3761,11 +3795,26 @@ def make_handler(app):
                 if p == "/api/pick_folder":
                     if app.busy():
                         return self._send(200, {"error": "Wait for the current upload to finish first."})
-                    folder = ask_for_folder()
+                    if app.window:
+                        picked = native_pick(app, "folder")
+                        folder = picked[0] if picked else ""
+                    else:
+                        folder = ask_for_folder()
                     if not folder:
                         return self._send(200, {"cancelled": True})
                     app.open(folder)
                     return self._send(200, {"ok": True})
+                if p == "/api/pick_photos":
+                    if app.busy():
+                        return self._send(200, {"error": "Wait for the current upload to finish first."})
+                    picked = native_pick(app, "photos") if app.window else []
+                    if not picked:
+                        return self._send(200, {"cancelled": True})
+                    folder, only = import_paths(picked)
+                    if not folder:
+                        return self._send(200, {"error": "None of those were JPEG photos."})
+                    app.open(folder, only)
+                    return self._send(200, {"ok": True, "in_place": not in_drop_root(folder)})
                 if p == "/api/drop/start":
                     if app.busy():
                         return self._send(200, {"error": "Wait for the current upload to finish first."})
@@ -3863,7 +3912,9 @@ def make_handler(app):
                         return self._send(200, {"ok": False, "message":
                                                 "An upload is still running. Quit anyway?"})
                     self._send(200, {"ok": True})
-                    threading.Timer(0.3, lambda: os._exit(0)).start()
+                    if app.window:
+                        threading.Timer(0.2, app.window.destroy).start()
+                    threading.Timer(0.6, lambda: os._exit(0)).start()
                     return
             except Exception as e:
                 return self._send(500, {"error": str(e)})
@@ -3897,7 +3948,7 @@ def pick_folder():
 def self_test(out_path):
     """Used by the app build to prove the bundle works: python stockup.py --selftest out.txt"""
     lines = [f"StockUp {VERSION} frozen={FROZEN}"]
-    for mod in ("PIL", "PIL.ImageCms", "keyring", "paramiko", "tkinter"):
+    for mod in ("PIL", "PIL.ImageCms", "keyring", "paramiko", "tkinter", "webview"):
         try:
             __import__(mod)
             lines.append(f"{mod}: ok")
@@ -4006,18 +4057,7 @@ def main(argv):
         return 0
 
 
-def serve(paths):
-    """Open the page. With no folder, it starts on the welcome screen. Folders or photos
-    dropped on the app's icon (or given on the command line) open straight away."""
-    app = App()
-    if paths:
-        folder, only = import_paths([os.path.abspath(p) for p in paths])
-        if folder:
-            print("Reading your photos…", end=" ", flush=True)
-            app.open(folder, only)
-            print(f"{len(app.batch.files)} JPEGs found.")
-        else:
-            print("No JPEG photos found in what was given; opening the welcome screen.")
+def start_server(app):
     restarting = os.environ.pop("STOCKUP_PORT", "")
     port = int(restarting) if restarting.isdigit() else 0
     server = None
@@ -4029,13 +4069,29 @@ def serve(paths):
             time.sleep(0.25)
     if server is None:
         server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
-        restarting = ""
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def serve(paths):
+    """Open StockUp. With no folder, it starts on the welcome screen. Folders or photos
+    dropped on the app's icon (or given on the command line) open straight away."""
+    app = App()
+    server = start_server(app)  # ready in a fraction of a second
     url = f"http://127.0.0.1:{server.server_address[1]}/"
+    threading.Thread(target=load_sites, daemon=True).start()  # warm up the keychain meanwhile
+    if paths:
+        folder, only = import_paths([os.path.abspath(p) for p in paths])
+        if folder:
+            app.open(folder, only)
+
+    if os.environ.get("STOCKUP_BROWSER") != "1" and open_window(app, url):
+        return 0  # the window was closed
+
+    # No app window on this computer (or asked for the browser): use the web browser
     print(f"StockUp {VERSION} is open in your browser: {url}\n"
           "Keep this window open while you work. Close it (or press Ctrl+C) to quit.")
-    if not restarting:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
-
+    webbrowser.open(url)
     if FROZEN:  # the app has no window of its own: quit a while after the page is closed
         def watchdog():
             while True:
@@ -4048,10 +4104,136 @@ def serve(paths):
                     os._exit(0)
         threading.Thread(target=watchdog, daemon=True).start()
     try:
-        server.serve_forever()
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         print("\nBye.")
     return 0
+
+
+# --------------------------------------------------------------------------
+# StockUp's own window (instead of a browser tab)
+# --------------------------------------------------------------------------
+
+def open_window(app, url):
+    """Show StockUp in its own window, using the page engine built into the computer
+    (Safari's on a Mac, Edge's on Windows). Returns False if that isn't possible here,
+    so StockUp can fall back to the browser."""
+    try:
+        import webview
+        from webview.dom import DOMEventHandler
+    except Exception:
+        return False
+    check_file = os.environ.get("STOCKUP_WINDOW_CHECK")  # used by the release checks
+    try:
+        window = webview.create_window(f"StockUp", url, width=1360, height=900,
+                                       min_size=(900, 600), text_select=True,
+                                       background_color="#121211" if _dark_mode() else "#f4f3ef")
+    except Exception:
+        return False
+    app.window = window
+
+    def closing():
+        if app.busy() and not check_file:
+            return window.create_confirmation_dialog(
+                "Quit StockUp?", "An upload is still running. If you quit now, any photo part-way "
+                                 "through is cleaned up the next time you upload.")
+        return True
+    window.events.closing += closing
+
+    def on_drop(e):
+        handle_native_drop(app, window, e)
+
+    def started(win):
+        try:
+            win.dom.document.events.drop += DOMEventHandler(on_drop, True, True)
+        except Exception:
+            pass  # drag and drop still works through the page itself
+        if check_file:
+            threading.Thread(target=_window_check, args=(app, win, check_file), daemon=True).start()
+
+    try:
+        os.makedirs(os.path.join(CONF_DIR, "window"), exist_ok=True)
+        webview.start(started, window, private_mode=False,
+                      storage_path=os.path.join(CONF_DIR, "window"))
+    except Exception:
+        app.window = None
+        return False
+    return True
+
+
+def _dark_mode():
+    try:
+        if sys.platform == "darwin":
+            import subprocess
+            r = subprocess.run(["defaults", "read", "-g", "AppleInterfaceStyle"],
+                               capture_output=True, text=True, timeout=2)
+            return "Dark" in r.stdout
+        if os.name == "nt":
+            import winreg
+            k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                               r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+            return winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 0
+    except Exception:
+        pass
+    return False
+
+
+def handle_native_drop(app, window, e):
+    """Photos or folders dropped on StockUp's window come with their real locations, so they
+    open right where they are; nothing is copied unless they come from several places."""
+    def tell(result):
+        try:
+            window.evaluate_js(f"nativeDropDone({json.dumps(result)})")
+        except Exception:
+            pass
+    try:
+        window.evaluate_js("nativeDropStarted()")
+    except Exception:
+        pass
+    files = (e.get("dataTransfer") or {}).get("files") or []
+    paths = [f.get("pywebviewFullPath") for f in files if f.get("pywebviewFullPath")]
+    if app.busy():
+        return tell({"error": "Wait for the upload to finish before opening other photos."})
+    if not paths:
+        return tell({"error": "StockUp couldn't tell where those came from. "
+                              "Use \u201cChoose a folder\u2026\u201d instead."})
+    try:
+        folder, only = import_paths(paths)
+        if not folder:
+            return tell({"error": "None of those were JPEG photos."})
+        app.open(folder, only)
+        copied = in_drop_root(folder) and not any(in_drop_root(p) for p in paths)
+        n = len(app.batch.files)
+        tell({"ok": True, "message": (
+            f"Copied {n} photo{'s' if n != 1 else ''} from several places into {folder}. "
+            f"Your originals are where they were." if copied else
+            f"Opened {n} photo{'s' if n != 1 else ''} right where they are \u2014 nothing was copied.")})
+    except Exception as ex:
+        tell({"error": str(ex)})
+
+
+def native_pick(app, kind):
+    """Your computer's own open window, shown by StockUp's window. Returns paths or []."""
+    import webview
+    if kind == "folder":
+        r = app.window.create_file_dialog(webview.FileDialog.FOLDER)
+    else:
+        r = app.window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=True,
+                                          file_types=("JPEG photos (*.jpg;*.jpeg;*.JPG;*.JPEG)",))
+    return list(r) if r else []
+
+
+def _window_check(app, window, out):
+    """Release check: the window opened and showed StockUp's page. Records how long it took."""
+    end = time.time() + 90
+    while time.time() < end and not app.page_ready_at:
+        time.sleep(0.05)
+    with open(out, "w") as fh:
+        fh.write(f"window: {'ok' if app.page_ready_at else 'FAILED page never showed'}\n")
+        if app.page_ready_at:
+            fh.write(f"ready_after: {app.page_ready_at - STARTED:.2f}\n")
+    window.destroy()
 
 
 if __name__ == "__main__":
