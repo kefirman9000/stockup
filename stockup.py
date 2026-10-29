@@ -72,6 +72,7 @@ OPTIONS_PATH = os.path.join(CONF_DIR, "stockup_options.json")
 STATE_NAME = "stockup.json"
 OUT_NAME = "stockup_output"
 UPLOAD_LOG_NAME = ".stockup_uploaded.json"
+APPLIED_NAME = ".stockup_applied.json"  # which photos' site spreadsheets you've applied
 HISTORY_PATH = os.path.join(CONF_DIR, "upload_history.json")
 IMAGE_EXT = (".jpg", ".jpeg")
 KEYRING_SERVICE = "StockUp"
@@ -1039,6 +1040,7 @@ class Batch:
             self.stat[f] = stat_key(p)
         self.scan = {"done": 0, "total": len(self.files), "ready": False}
         self.sent = self._load_sent()
+        self.applied = self._load_applied()
         self.history = load_history()
         self._looks_idx, self._looks, self._looks_cache = None, [], {}
         self.state = self._load_state()
@@ -1090,6 +1092,34 @@ class Batch:
                 return {k: set(v) for k, v in json.load(fh).items()}
         except (OSError, ValueError):
             return {}
+
+    def _load_applied(self):
+        try:
+            with open(os.path.join(self.folder, APPLIED_NAME), encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
+
+    def sheet_status(self, f, site):
+        """Where this photo's site spreadsheet stands: None (nothing to do yet), "waiting"
+        (uploaded; spreadsheet not applied yet), "applied", or "changed" (edited since)."""
+        if site not in FINISH or f not in self.sent.get(site, set()):
+            return None
+        rec = self.applied.get(site, {}).get(f)
+        if not rec:
+            return "waiting"
+        return "applied" if rec.get("key") == sheet_key(self.state[f], site) else "changed"
+
+    def mark_applied(self, site, files):
+        when = datetime.now().strftime("%Y-%m-%d %H:%M")
+        done = self.applied.setdefault(site, {})
+        for f in files:
+            if f in self.state:
+                done[f] = {"at": when, "key": sheet_key(self.state[f], site)}
+        tmp = os.path.join(self.folder, APPLIED_NAME + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self.applied, fh, indent=1)
+        os.replace(tmp, os.path.join(self.folder, APPLIED_NAME))
 
     def changed_originals(self):
         """Originals that changed since StockUp opened them (StockUp never writes to them)."""
@@ -1511,7 +1541,9 @@ class Batch:
                         "keywords": m["keywords"], "info": m["info"], "label": m.get("label", ""),
                         "preformatted": looks_editorial(m["description"]) or looks_editorial(m["title"]),
                         "auto": self.auto_reason(f, opts), "sites": sites,
-                        "twins": self.twins.get(f, []), **self.state[f]})
+                        "twins": self.twins.get(f, []), **self.state[f],
+                        "steps": {st: self.sheet_status(f, st) for st in opts["my_sites"]
+                                  if self.sheet_status(f, st)}})
         return out
 
     def thumbnail(self, f):
@@ -1738,6 +1770,54 @@ def write_csv(path, header, rows):
         w.writerows(rows)
 
 
+def sheet_name(site):
+    return f"adobe_{datetime.now():%m_%d_%y}.csv" if site == "adobe" else \
+        {"shutterstock": "shutterstock.csv", "depositphotos": "depositphotos.csv",
+         "dreamstime": "dreamstime.csv", "123rf": "123rf.csv", "pond5": "pond5.csv"}.get(site)
+
+
+def write_sheet(batch, site, rows, sd):
+    """Write a site's spreadsheet for these (file, plan, state) rows. Returns (files, notes)."""
+    name, notes = sheet_name(site), []
+    if not name:
+        return [], notes
+    path = os.path.join(sd, name)
+    if site == "shutterstock":
+        # Exactly the columns of Shutterstock's sample, in its order.
+        write_csv(path, ["Filename", "Description", "Keywords", "Categories", "Illustration",
+                         "Mature Content", "Editorial"],
+                  [[p["name"], p["desc"], ",".join(p["keywords"]), ",".join(s["ss_cats"]), "No", "No",
+                    "Yes" if s["editorial"] else "No"] for f, p, s in rows])
+        for f, p, s in rows:
+            if not s["ss_cats"]:
+                notes.append(f"[Shutterstock] {f}: no category chosen (required).")
+    elif site == "adobe":
+        write_csv(path, ["Filename", "Title", "Keywords", "Category", "Releases"],
+                  [[p["name"], p["title"], ",".join(p["keywords"]), s["adobe_cat"] or "", ""]
+                   for f, p, s in rows])
+    elif site == "depositphotos":
+        write_csv(path, ["Filename", "Description", "Keywords", "Editorial", "Nudity", "Releases"],
+                  [[p["name"], p["desc"], ",".join(p["keywords"]),
+                    "yes" if s["editorial"] else "no", "no", ""] for f, p, s in rows])
+    elif site == "dreamstime":
+        write_csv(path, ["Filename", "Image Name", "Description", "Category 1", "Category 2",
+                         "Category 3", "keywords", "Free", "W-EL", "P-EL", "SR-EL", "SR-Price",
+                         "Editorial", "MR doc Ids", "Pr Docs"],
+                  [[p["name"], p["title"], p["desc"],
+                    *(list(s["dt_cats"]) + [0, 0, 0])[:3], ",".join(p["keywords"]),
+                    0, 0, 0, 0, 0, 1 if s["editorial"] else 0, "", ""] for f, p, s in rows])
+    elif site == "123rf":
+        write_csv(path, ["oldfilename", "123rf_filename", "description", "keywords", "country"],
+                  [[p["name"], "", p["desc"], ",".join(p["keywords"]), ""] for f, p, s in rows])
+    elif site == "pond5":
+        write_csv(path, ["originalfilename", "title", "description", "keywords", "city", "region",
+                         "country", "editorial"],
+                  [[p["name"], p["title"], p["desc"], ",".join(p["keywords"]),
+                    s["ed_city"] if s["editorial"] else "", s["ed_region"] if s["editorial"] else "",
+                    "", "yes" if s["editorial"] else "no"] for f, p, s in rows])
+    return [name], notes
+
+
 def build_outputs(batch, progress=None):
     opts = load_options()
     out = batch.out
@@ -1771,55 +1851,14 @@ def build_outputs(batch, progress=None):
                 editorial.append(p["name"])
             rows.append((f, p, s))
 
-        files = []
-        if site == "shutterstock":
-            write_csv(os.path.join(sd, "shutterstock.csv"),
-                      ["Filename", "Description", "Keywords", "Categories", "Editorial"],
-                      [[p["name"], p["desc"], ",".join(p["keywords"]), ",".join(s["ss_cats"]),
-                        "Yes" if s["editorial"] else "No"] for f, p, s in rows])
-            files.append("shutterstock.csv")
-            for f, p, s in rows:
-                if not s["ss_cats"]:
-                    report.append(f"[Shutterstock] {f}: no category chosen (required).")
-        elif site == "adobe":
-            name = f"adobe_{datetime.now():%m_%d_%y}.csv"
-            write_csv(os.path.join(sd, name), ["Filename", "Title", "Keywords", "Category", "Releases"],
-                      [[p["name"], p["title"], ",".join(p["keywords"]), s["adobe_cat"] or "", ""]
-                       for f, p, s in rows])
-            files.append(name)
-        elif site == "depositphotos":
-            write_csv(os.path.join(sd, "depositphotos.csv"),
-                      ["Filename", "Description", "Keywords", "Editorial", "Nudity", "Releases"],
-                      [[p["name"], p["desc"], ",".join(p["keywords"]),
-                        "yes" if s["editorial"] else "no", "no", ""] for f, p, s in rows])
-            files.append("depositphotos.csv")
-        elif site == "dreamstime":
-            write_csv(os.path.join(sd, "dreamstime.csv"),
-                      ["Filename", "Image Name", "Description", "Category 1", "Category 2",
-                       "Category 3", "keywords", "Free", "W-EL", "P-EL", "SR-EL", "SR-Price",
-                       "Editorial", "MR doc Ids", "Pr Docs"],
-                      [[p["name"], p["title"], p["desc"],
-                        *(list(s["dt_cats"]) + [0, 0, 0])[:3], ",".join(p["keywords"]),
-                        0, 0, 0, 0, 0, 1 if s["editorial"] else 0, "", ""] for f, p, s in rows])
-            files.append("dreamstime.csv")
-        elif site == "123rf":
-            write_csv(os.path.join(sd, "123rf.csv"),
-                      ["oldfilename", "123rf_filename", "description", "keywords", "country"],
-                      [[p["name"], "", p["desc"], ",".join(p["keywords"]), ""] for f, p, s in rows])
-            files.append("123rf.csv")
+        files, notes = write_sheet(batch, site, rows, sd)
+        report += notes
+        if site == "123rf":
             gb = sum(os.path.getsize(batch.site_file(f, site, p)) for f, p, s in rows) / 1024 ** 3
             if gb > rules["batch_gb"]:
                 report.append(f"[123RF] This batch is {gb:.1f} GB; 123RF's FTP takes "
                               f"{rules['batch_gb']} GB at a time. Upload it in two parts.")
-        elif site == "pond5":
-            write_csv(os.path.join(sd, "pond5.csv"),
-                      ["originalfilename", "title", "description", "keywords", "city", "region",
-                       "country", "editorial"],
-                      [[p["name"], p["title"], p["desc"], ",".join(p["keywords"]),
-                        s["ed_city"] if s["editorial"] else "", s["ed_region"] if s["editorial"] else "",
-                        "", "yes" if s["editorial"] else "no"] for f, p, s in rows])
-            files.append("pond5.csv")
-        elif site == "istock":
+        if site == "istock":
             for sub in ("creative", "editorial"):
                 d = os.path.join(sd, sub)
                 if os.path.isdir(d):
@@ -2215,6 +2254,144 @@ def send_sheet(batch, site):
         c.close()
     return {"ok": True, "message": f"Sent {sheet} to {SITES[site]['label']}"
                                    f"{' over an encrypted connection' if enc else ''}."}
+
+# The last step on each site: their spreadsheet. Sites never read categories (or, except
+# Alamy, the editorial setting) from files sent over FTP, so they only take effect once the
+# spreadsheet is applied on the site, after the photos have shown up there.
+FINISH = {
+    "shutterstock": {
+        "carries": "categories and the editorial setting",
+        "url": "https://submit.shutterstock.com/",
+        "steps": ["Open Shutterstock’s Submit page and wait until all {n} photos show up "
+                  "there. Photos sent by FTP can take a few minutes, sometimes longer, to appear.",
+                  "Click CSV at the top of the Submit page and choose {file}.",
+                  "Open a photo or two to check the categories and editorial setting, then submit."],
+    },
+    "adobe": {
+        "carries": "categories, titles and keywords",
+        "url": "https://contributor.stock.adobe.com/",
+        "steps": ["Open Adobe Stock’s Uploads page and wait until all {n} photos show up.",
+                  "Click Upload CSV and choose {file}.",
+                  "Adobe has no editorial column: tick editorial yourself for the photos marked "
+                  "EDITORIAL here, then submit."],
+    },
+    "dreamstime": {
+        "carries": "titles, keywords, categories and the editorial setting",
+        "send": True,
+        "steps": ["Wait until all {n} photos show up in Dreamstime’s Unfinished section.",
+                  "Press Send spreadsheet below. StockUp puts {file} on Dreamstime’s FTP, "
+                  "and Dreamstime fills in the photos from it."],
+    },
+    "depositphotos": {
+        "carries": "the editorial setting",
+        "steps": ["Wait until all {n} photos show up in Depositphotos’ upload tool.",
+                  "Upload {file} there."],
+    },
+    "123rf": {
+        "carries": "descriptions and keywords",
+        "steps": ["Wait until all {n} photos show up in 123RF’s contributor area.",
+                  "Upload {file} there, and tick editorial for the photos marked EDITORIAL here."],
+    },
+    "pond5": {
+        "carries": "the editorial setting and place",
+        "steps": ["Wait until all {n} photos show up in Pond5’s Uploads.",
+                  "Go to Uploads > Apply CSV and choose {file}."],
+    },
+}
+
+
+def sheet_key(state, site):
+    """What a site's spreadsheet carries for a photo, to notice edits made after applying it."""
+    if site == "shutterstock":
+        return [sorted(state.get("ss_cats", [])), bool(state.get("editorial"))]
+    if site == "adobe":
+        return [state.get("adobe_cat") or ""]
+    if site == "dreamstime":
+        return [list(state.get("dt_cats", [])), bool(state.get("editorial"))]
+    if site in ("depositphotos", "pond5"):
+        return [bool(state.get("editorial"))]
+    return []
+
+
+def finish_sheet(batch, site):
+    """A spreadsheet with only the photos already uploaded to this site that still need it."""
+    opts = load_options()
+    todo = [f for f in batch.files if batch.sheet_status(f, site) in ("waiting", "changed")]
+    rows = []
+    for f in todo:
+        rows.append((f, batch.plan(f, site, opts), batch.state[f]))
+    sd = os.path.join(batch.out, site, "to apply")
+    if os.path.isdir(sd):
+        shutil.rmtree(sd)
+    os.makedirs(sd)
+    files, notes = write_sheet(batch, site, rows, sd) if rows else ([], [])
+    with open(os.path.join(sd, "photos.json"), "w", encoding="utf-8") as fh:
+        json.dump(todo, fh)
+    return {"path": os.path.join(sd, files[0]) if files else "", "photos": todo, "notes": notes}
+
+
+def finish_overview(batch):
+    """Each site's last step, with how many photos are waiting, applied or changed."""
+    out = []
+    for site in load_options()["my_sites"]:
+        if site not in FINISH:
+            continue
+        counts = {"waiting": 0, "changed": 0, "applied": 0}
+        for f in batch.files:
+            st = batch.sheet_status(f, site)
+            if st:
+                counts[st] += 1
+        if not any(counts.values()):
+            continue
+        info = FINISH[site]
+        sheet = finish_sheet(batch, site) if counts["waiting"] + counts["changed"] else None
+        n = counts["waiting"] + counts["changed"]
+        name = os.path.basename(sheet["path"]) if sheet and sheet["path"] else sheet_name(site)
+        out.append({"site": site, "label": SITES[site]["label"], "carries": info["carries"],
+                    "url": info.get("url", ""), "send": bool(info.get("send")), **counts,
+                    "file": sheet["path"] if sheet else "", "notes": sheet["notes"] if sheet else [],
+                    "steps": [t.format(n=n, file=name) for t in info["steps"]]})
+    return out
+
+
+def finish_done(batch, site):
+    """You applied the spreadsheet (or StockUp sent it): remember it for those photos."""
+    path = os.path.join(batch.out, site, "to apply", "photos.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            photos = json.load(fh)
+    except (OSError, ValueError):
+        raise RuntimeError("Open the site steps again first.")
+    batch.mark_applied(site, photos)
+    return {"ok": True, "count": len(photos)}
+
+
+def send_finish_sheet(batch, site):
+    """Dreamstime: put the spreadsheet for the uploaded photos on its FTP, then remember it."""
+    sheet = finish_sheet(batch, site)
+    if not sheet["path"]:
+        raise RuntimeError("Every uploaded photo already has its spreadsheet.")
+    login = next(s for s in load_sites() if s["name"] == site)
+    c = connect(login)
+    try:
+        c.put(sheet["path"], os.path.basename(sheet["path"]), lambda n: None)
+        enc = c.encrypted
+    finally:
+        c.close()
+    batch.mark_applied(site, sheet["photos"])
+    return {"ok": True, "message": f"Sent the spreadsheet for {len(sheet['photos'])} photos to "
+                                   f"{SITES[site]['label']}{' over an encrypted connection' if enc else ''}."}
+
+
+def reveal(path):
+    """Show a file in Finder / File Explorer."""
+    import subprocess
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", path])
+    elif os.name == "nt":
+        subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+    else:
+        subprocess.Popen(["xdg-open", os.path.dirname(path)])
 
 
 class Interrupted(Exception):
@@ -3051,6 +3228,7 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
         <option value="all">Show every photo</option><option value="ed">Show editorial</option>
         <option value="com">Show creative</option><option value="nocat">Show ones missing a category</option>
         <option value="issues">Show ones a site would reject</option>
+        <option value="steps">Show ones waiting on a site step</option>
       </select>
       <span class="hint" id="selcount">0 picked</span>
     </div>
@@ -3100,6 +3278,7 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
   <span id="msg">Click a photo to pick it. Shift-click to pick a range.</span>
   <div class="sites" id="sites"></div>
   <button onclick="testSites()">Check logins</button>
+  <button onclick="siteSteps()" id="stepsBtn" style="display:none">Site steps</button>
   <button onclick="build()" id="buildBtn">Make site files</button>
   <button class="primary" onclick="upload()" id="uploadBtn">Upload</button>
 </footer>
@@ -3138,7 +3317,7 @@ const hasIssue=it=>Object.values(it.sites).some(s=>s.status=='fix'||s.status=='s
 function visible(){
   const f=$('filter').value;
   return items.filter(it=>f=='all'||(f=='ed'&&it.editorial)||(f=='com'&&!it.editorial)||
-    (f=='nocat'&&((my().includes('shutterstock')&&!it.ss_cats.length)||(my().includes('adobe')&&!it.adobe_cat)||(my().includes('dreamstime')&&!it.dt_cats.length)))||(f=='issues'&&hasIssue(it)));
+    (f=='nocat'&&((my().includes('shutterstock')&&!it.ss_cats.length)||(my().includes('adobe')&&!it.adobe_cat)||(my().includes('dreamstime')&&!it.dt_cats.length)))||(f=='issues'&&hasIssue(it))||(f=='steps'&&Object.values(it.steps||{}).some(x=>x!='applied')));
 }
 function chips(it){
   const word={ok:'ready',warn:'ready, with a note',fix:'needs a fix',skip:'not sending',sent:'sent'};
@@ -3161,6 +3340,10 @@ function render(){
     if(my().includes('shutterstock'))t.push(it.ss_cats.length?`<span class="tag">SS: ${esc(it.ss_cats.join(' + '))}${au('ss')}</span>`:'<span class="tag warn">no Shutterstock category</span>');
     if(my().includes('adobe')&&it.adobe_cat)t.push(`<span class="tag">Adobe: ${esc(AD[it.adobe_cat])}${au('adobe')}</span>`);
     if(my().includes('dreamstime')&&it.dt_cats.length)t.push(`<span class="tag">DT: ${esc(it.dt_cats.map(c=>DTNAME[c]?.split(' › ').pop()).join(', '))}${au('dt')}</span>`);
+    for(const [s,st] of Object.entries(it.steps||{})){const c=FINISHCARRY[s]||'its details';
+      t.push(st=='applied'?`<span class="tag ok" title="You applied ${esc(lab(s))}’s spreadsheet for this photo, which sets ${esc(c)}">${esc(SITES[s].short)} ✓ applied</span>`
+        :st=='changed'?`<span class="tag warn" title="Changed here after you applied ${esc(lab(s))}’s spreadsheet. Change it on ${esc(lab(s))} too, or apply the new spreadsheet from Site steps if it isn’t submitted yet.">${esc(SITES[s].short)}: changed since applied</span>`
+        :`<span class="tag warn" title="Uploaded. ${esc(lab(s))} only sets ${esc(c)} once you apply its spreadsheet: see Site steps.">${esc(SITES[s].short)}: spreadsheet not applied</span>`);}
     if(it.info.gps)t.push(`<span class="tag ${opts.strip_gps?'':'warn'}" title="Where the photo was taken is saved in the file">${opts.strip_gps?'GPS removed on upload':'has GPS location'}</span>`);
     const mp=(it.info.width*it.info.height/1e6).toFixed(1);
     return `<div class="card ${sel.has(it.file)?'sel':''} ${it.editorial?'ed':''}" data-f="${esc(it.file)}" title="${esc(it.auto?'Marked editorial automatically: '+it.auto:'')}">
@@ -3469,7 +3652,8 @@ async function status(){
         ${s.running?`<button class="small" ${s.stopping?'disabled':''} onclick="stopUpload()">${s.stopping?'Stopping…':'Stop'}</button>`:''}
         <button class="small" onclick="uploadDetails()">Details</button>${s.running?'':'<button class="small" onclick="hideDock()">Close</button>'}</div>`;
   }
-  if(!s.running){clearInterval(poll);if(Object.keys(s.sites).length){note('Upload finished.');load()}}
+  if(!s.running){const was=!!poll;clearInterval(poll);poll=null;if(Object.keys(s.sites).length){note('Upload finished.');
+    await load();if(was&&pendingSteps())siteSteps(true)}}
 }
 function hideDock(){dockHidden=true;$('dock').style.display='none'}
 async function stopUpload(){
@@ -3657,9 +3841,36 @@ async function load(){
   if(r.no_batch){items=[];clearTimeout(scanT);scanT=null;showWelcome(r);return}
   document.body.classList.remove('nobatch');items=r.items;window._dropped=r.dropped;
   $('folder').textContent=r.folder.split(/[\\/]/).filter(Boolean).pop()+' · '+items.length+' photos'+(r.only?' picked from this folder':'');$('folder').title=r.folder;
-  render();showScan(r.scan);
+  render();showScan(r.scan);stepsButton();
   if(!r.scan.ready&&!scanT)watchScan();
 }
+/* site steps: each site's spreadsheet, applied on the site after the photos show up there */
+const FINISHCARRY={shutterstock:'categories and the editorial setting',adobe:'categories, titles and keywords',dreamstime:'titles, keywords, categories and the editorial setting',depositphotos:'the editorial setting','123rf':'descriptions and keywords',pond5:'the editorial setting and place'};
+const pendingSteps=()=>items.reduce((a,it)=>a+Object.values(it.steps||{}).filter(x=>x!='applied').length,0);
+function stepsButton(){const n=pendingSteps(),any=items.some(it=>Object.keys(it.steps||{}).length);
+  const b=$('stepsBtn');b.style.display=any?'':'none';b.textContent=n?`Site steps (${n} to do)`:'Site steps ✓';b.classList.toggle('primary',!!n)}
+async function siteSteps(afterUpload){
+  let r;try{r=await api('/api/finish',{})}catch(e){return note(e.message)}
+  if(!r.sites.length)return panel('<h3>Site steps</h3><p>Nothing to do yet. After an upload, this shows each site’s last step.</p>');
+  panel(`<h3>${afterUpload?'Uploaded — one last step per site':'Site steps'}</h3>
+    <p class="hint">Sites don’t read categories (and most don’t read the editorial setting) from photos sent by FTP. They only take them from their spreadsheet, applied on the site once the photos have arrived there. StockUp can’t see inside your accounts, so tell it when you’ve done each one and every photo shows where it stands.</p>`+
+    r.sites.map(s=>{const todo=s.waiting+s.changed;
+      return `<div class="site"><h4>${esc(s.label)} ${todo?`<span class="tag warn">${todo} to do</span>`:'<span class="tag ok">✓ done</span>'}</h4>
+      <div class="hint">${s.applied} applied${s.waiting?` · ${s.waiting} waiting`:''}${s.changed?` · ${s.changed} changed since you applied it`:''}. This spreadsheet sets ${esc(s.carries)}.</div>
+      ${todo?`<ol>${s.steps.map(t=>`<li>${esc(t)}</li>`).join('')}</ol>
+      ${s.notes.map(n=>`<div class="err">${esc(n)}</div>`).join('')}
+      <p>${s.url?`<a href="${esc(s.url)}" target="_blank" rel="noopener"><button class="small">Open ${esc(s.label)}</button></a> `:''}
+        ${s.send?`<button class="small primary" onclick="sendFinish('${s.site}')">Send spreadsheet</button>`
+          :`<button class="small" onclick="showFinish('${s.site}')">Show the spreadsheet</button>
+            <button class="small primary" onclick="finishDone('${s.site}',${todo})">I’ve applied it</button>`}</p>`:''}</div>`}).join(''));
+}
+async function showFinish(site){try{await api('/api/finish/show',{site})}catch(e){note(e.message)}}
+async function finishDone(site,n){
+  if(!confirm(`Mark the spreadsheet as applied for these ${n} photos on ${lab(site)}? Only do this once ${lab(site)} shows their ${FINISHCARRY[site]||'details'}.`))return;
+  try{await api('/api/finish/done',{site});await load();siteSteps()}catch(e){note(e.message)}}
+async function sendFinish(site){
+  if(!confirm(`Send the spreadsheet to ${lab(site)} now? It only applies to photos that already show up there.`))return;
+  try{const r=await api('/api/finish/send',{site});note(r.message,true);await load();siteSteps()}catch(e){note(e.message,true)}}
 window.addEventListener('beforeunload',()=>{if(dirty)save()});
 window.addEventListener('pagehide',()=>{try{navigator.sendBeacon('/api/bye','')}catch(e){}});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)fetch('/api/ping').catch(()=>{})});
@@ -3942,7 +4153,8 @@ class App:
 
 
 NEEDS_BATCH = {"/api/scan", "/api/save", "/api/autocats", "/api/fix", "/api/build", "/api/preview",
-               "/api/upload", "/api/send_sheet"}
+               "/api/upload", "/api/send_sheet", "/api/finish", "/api/finish/done",
+               "/api/finish/send", "/api/finish/show"}
 
 
 def make_handler(app):
@@ -4171,6 +4383,25 @@ def make_handler(app):
                     return self._send(200, {"ok": True})
                 if p == "/api/send_sheet":
                     return self._send(200, send_sheet(batch, body.get("site", "")))
+                if p.startswith("/api/finish"):
+                    site = body.get("site", "")
+                    if p == "/api/finish":
+                        return self._send(200, {"sites": finish_overview(batch)})
+                    if site not in FINISH:
+                        return self._send(400, {"error": "Unknown site."})
+                    if p == "/api/finish/done":
+                        return self._send(200, finish_done(batch, site))
+                    if p == "/api/finish/send":
+                        return self._send(200, send_finish_sheet(batch, site))
+                    if p == "/api/finish/show":
+                        path = os.path.join(batch.out, site, "to apply", sheet_name(site) or "")
+                        found = [os.path.join(os.path.dirname(path), x) for x in
+                                 os.listdir(os.path.dirname(path)) if x.endswith(".csv")] \
+                            if os.path.isdir(os.path.dirname(path)) else []
+                        if not found:
+                            return self._send(400, {"error": "Open the site steps again first."})
+                        reveal(found[0])
+                        return self._send(200, {"ok": True})
                 if p == "/api/upload":
                     if app.uploader.running:
                         return self._send(200, {"started": True})
