@@ -4,7 +4,9 @@
 
 StockUp works with Shutterstock, Adobe Stock, Dreamstime, Alamy, iStock, Depositphotos, 123RF and Pond5.
 
-You keyword and title your photos once, the way you already do. StockUp reads those words from the files and checks each photo against every site's rules, offering a fix for anything a site would reject. It then makes the files each site asks for and uploads to all of them at once.
+You keyword and title your photos once, the way you already do. StockUp reads those words from the files and checks each photo against every site's rules. It then makes the files each site asks for and uploads to all of them at once.
+
+**Your photos are safe.** By default, StockUp uploads your exact files, byte for byte, and never writes to your originals. See [Safety](#safety).
 
 ![StockUp in dark mode](screenshots/review-dark.png)
 
@@ -27,16 +29,14 @@ StockUp asks which folder holds your batch, then opens in your web browser. Noth
 ## What it does for you
 
 - **Checks every photo for every site.** Each photo has a badge per site: green means ready, amber means it needs a fix, and crossed out means it won't be sent. **Check photos** lists everything by site, with a button to fix it.
-- **Fixes problems for you**, only when you click. Your originals are never changed; fixes make copies just for that site.
-  - Shortens titles and descriptions that are too long, and shows the suggestion first.
-  - Gives files a safe name where a site would mangle accents or symbols.
-  - Makes **sRGB** copies of Adobe RGB, ProPhoto, CMYK or grayscale photos.
-  - Makes smaller or resized copies of files over a site's limit.
-  - Makes standard (baseline) JPEGs for Alamy.
+- **Fixes text problems in a click.** It shortens titles and descriptions that are too long, showing the suggestion first, and gives files a safe name where a site would mangle accents or symbols. Only the spreadsheets or the uploaded file's name change; the photo itself doesn't.
+- **Optional adjusted copies,** off by default. If you allow them in Settings, StockUp can make **sRGB** copies, smaller files, standard (baseline) JPEGs for Alamy, and **resize for upload** to a longest side or megapixel size you choose. It never makes photos bigger, and never goes below a site's minimum. Copies are made only for the sites that need them; your originals stay as they are.
 - **Skips photos a site won't take,** like ones under its minimum size, so they don't fail review. **Send anyway** overrides this.
 - **Marks editorial in bulk.** Shift-click a range and click **Editorial**. Photos are also marked for you if the caption already starts with a place and date, or if they have a keyword or Lightroom color label you choose.
 - **Keeps your captions as written** when they already start with a place and date. For the rest, StockUp adds the place and date in each site's format.
-- **Uploads to the sites you tick, all at once.** If the connection drops, press **Upload** again and it carries on.
+- **Uploads to the sites you tick,** all at once or one site at a time, with a progress bar for each site. If the connection drops, press **Upload** again and it carries on.
+- **Shuffles the upload order** and keeps look-alike photos apart, so reviewers don't see a run of near-identical frames. Each site gets its own order.
+- **Fills in Dreamstime too:** titles, keywords, up to three categories, and the editorial flag, sent to Dreamstime with one button.
 - **Keeps your passwords in your computer's keychain:** Keychain on Mac, Credential Manager on Windows.
 - **Light and dark mode,** and an **Update** button when a new version is out.
 
@@ -44,15 +44,31 @@ StockUp asks which folder holds your batch, then opens in your web browser. Noth
 |---|---|
 | ![Check photos](screenshots/checks-dark.png) | ![Site details](screenshots/details-dark.png) |
 
-| Logins | Uploading |
+| Before anything is sent | Uploading, site by site |
 |---|---|
-| ![Logins](screenshots/logins-dark.png) | ![Uploading](screenshots/upload-dark.png) |
+| ![Upload preview](screenshots/preview-dark.png) | ![Uploading](screenshots/upload-dark.png) |
 
-<details><summary>Settings and light mode</summary>
+| Settings | Logins |
+|---|---|
+| ![Settings](screenshots/settings-dark.png) | ![Logins](screenshots/logins-dark.png) |
 
-![Settings](screenshots/settings-dark.png)
+<details><summary>Light mode</summary>
+
 ![StockUp in light mode](screenshots/review-light.png)
 </details>
+
+## Safety
+
+- **Exact files by default.** Every site gets your original files, byte for byte. Fixes that would change the picture stay switched off unless you choose **Let StockUp make adjusted copies** in Settings. The badge at the top of the page always shows which mode you're in.
+- **Your originals are never written to.** Anything StockUp makes is a separate copy in `stockup_output`. Copies are real copies, never links back to your originals. StockUp also fingerprints every original when it opens a batch and checks them again after making files and after uploading. If another app changed one in the meantime, StockUp tells you.
+- **You see everything before it's sent.** **Upload** first shows, for each site: how many photos, which are editorial or copies, what's being left out, and how it will connect. Nothing leaves your computer until you press **Start upload**, and **Stop** halts it after the current photo.
+- **Nothing on a site's server is overwritten.** If a file with the same name is already waiting there, StockUp leaves it alone.
+- **No double uploads.** StockUp remembers what it has sent to each site, across all your batches, and recognises a photo even if it's renamed. A photo already sent is skipped, and one that only *looks* the same is flagged for you to check.
+- **Encrypted when possible.** StockUp always tries an encrypted connection first. It only uses plain FTP for a site that doesn't offer encryption, and you can turn that off in Settings. Each site's progress bar shows whether its connection is encrypted.
+- **Your location stays private if you want.** Photos carrying a GPS location are flagged. **Remove GPS location** blanks it out of what's uploaded, without re-saving or changing the picture.
+- **Passwords** go in your computer's keychain; usernames stay in a settings file only you can read.
+- **A receipt of every upload:** `upload_receipt.csv` lists each photo, the site, the time, whether the original or a copy was sent, whether the connection was encrypted, and a fingerprint of exactly what was sent.
+- **Only StockUp's page can control StockUp.** Its page runs on your own computer and refuses requests from any other website.
 
 ## Each batch
 
@@ -70,10 +86,11 @@ StockUp asks which folder holds your batch, then opens in your web browser. Noth
 | Depositphotos | Upload `depositphotos.csv`. This sets the editorial flag too. |
 | 123RF | Upload `123rf.csv`. Tick editorial for the files in `editorial_list.txt`. |
 | Pond5 | *Uploads › Apply CSV › pond5.csv*. Pond5 only documents its video spreadsheet, so check your first batch. |
-| Dreamstime, Alamy | They read your titles and keywords from the photos. Tick editorial for the files in `editorial_list.txt`. |
+| Dreamstime | When the photos show up in Dreamstime's *Unfinished* section, click **Send spreadsheet to Dreamstime** in StockUp. It fills in titles, keywords, categories and the editorial flag. |
+| Alamy | Alamy reads your titles and keywords from the photos. Tick "Sell for editorial only" for the files in `editorial_list.txt`. |
 | iStock | No upload from StockUp. Drag the `creative` folder into a Creative batch and `editorial` into an Editorial batch. |
 
-Everything is saved in a `stockup_output` folder inside your batch folder, with one folder per site. `checks.txt` lists anything still worth a look.
+Everything is saved in a `stockup_output` folder inside your batch folder, with one folder per site. `checks.txt` lists anything still worth a look, and `upload_receipt.csv` lists everything sent.
 
 ## What StockUp checks
 
@@ -94,6 +111,7 @@ These come from each site's contributor help pages. Sites change their rules, so
 
 - **Adobe Stock uploads** only work if Adobe has given your account SFTP login details (shown on its Upload page). Otherwise, drag the files into Adobe's website. The spreadsheet still saves the typing.
 - **Adobe and editorial:** Adobe only accepts *illustrative* editorial. StockUp flags editorial photos for Adobe so you can choose to skip them.
+- **Dreamstime's username** is the user ID number shown on its FTP page, not your email.
 - **Pond5** uses a separate FTP password, which you set in Pond5's *Dashboard › Account › FTP*.
 - **Photos must be JPEGs** with titles and keywords saved in them, the way Lightroom, Bridge, Photo Mechanic and most keywording tools save them.
 
