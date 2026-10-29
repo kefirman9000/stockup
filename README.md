@@ -63,9 +63,9 @@ StockUp's window uses the page engine built into your computer: Safari's on a Ma
 |---|---|
 | ![Upload preview](screenshots/preview-dark.png) | ![Uploading](screenshots/upload-dark.png) |
 
-| Paused |
-|---|
-| ![Paused](screenshots/paused-dark.png) |
+| Paused | After the upload: site steps |
+|---|---|
+| ![Paused](screenshots/paused-dark.png) | ![Site steps](screenshots/steps-dark.png) |
 
 | Settings | Logins |
 |---|---|
@@ -160,6 +160,10 @@ StockUp has an automated test suite in `tests/` that checks its safety features 
 pip install pillow pytest
 python -m pytest
 ```
+
+## Screenshots
+
+The pictures above are remade with `python screenshots/make_screenshots.py`, using the sample photos in `screenshots/sample-batch`. Those are drawn landscapes, made for this, so they're free to show anywhere. The script runs in a temporary folder with pretend sites, so it never touches your settings, logins or keychain.
 
 ## Running the script
 
