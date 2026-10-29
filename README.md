@@ -123,6 +123,15 @@ These come from each site's contributor help pages. Sites change their rules, so
 - **Pond5** uses a separate FTP password, which you set in Pond5's *Dashboard › Account › FTP*.
 - **Photos must be JPEGs** with titles and keywords saved in them, the way Lightroom, Bridge, Photo Mechanic and most keywording tools save them.
 
+## Tested on every release
+
+StockUp has an automated test suite in `tests/` that checks its safety features and the files it makes for each site. It runs on Mac, Windows and Linux after every change, and a new version is only published if every test passes. To run it yourself:
+
+```
+pip install pillow pytest
+python -m pytest
+```
+
 ## Running the script
 
 If you'd rather not use the app, install [Python](https://www.python.org/downloads/), download `stockup.py`, and run it:

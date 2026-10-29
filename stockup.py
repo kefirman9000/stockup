@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 
@@ -911,7 +911,7 @@ def picture_hash(path):
         im = Image.open(path)
         im.draft("L", (128, 128))
         im = im.convert("L").resize((9, 8), Image.BILINEAR)
-        px = list(im.getdata())
+        px = list(im.tobytes())  # one brightness value per pixel
         bits = 0
         for r in range(8):
             for c in range(8):
@@ -1348,7 +1348,7 @@ class Batch:
                 if k < 1 and px * k * k < floor:
                     k = math.sqrt(floor / px)
                     note = f" (kept above {rules['label']}'s minimum)"
-                if k < 0.999:
+                if k * k < 0.9:  # not worth re-saving the photo to shave off under 10%
                     scale = k
                     ops.add("downscale")
                     issue("info", f"Resized for upload to {round(info['width'] * k)} \u00d7 "
