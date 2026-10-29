@@ -24,7 +24,14 @@ Get the newest version from the **[Releases page](../../releases/latest)**:
 - **Mac:** unzip, drag **StockUp** to Applications, then right-click it and choose **Open**. macOS asks this once because the app isn't from the App Store. If it still won't open, go to *System Settings › Privacy & Security* and click **Open Anyway**.
 - **Windows:** unzip and double-click **StockUp**. If a blue "Windows protected your PC" box appears, click **More info › Run anyway**.
 
-StockUp asks which folder holds your batch, then opens in your web browser. Nothing is sent anywhere until you click **Upload**.
+StockUp opens in your web browser. Drag photos or a folder onto it, choose a folder, or pick one of your recent batches. Nothing is sent anywhere until you click **Upload**.
+
+![The welcome screen](screenshots/welcome-dark.png)
+
+**Three ways to open a batch**
+- **Drag photos or a folder onto the page.** StockUp first looks for them on your computer: in your recent batches, Pictures, Desktop, Downloads, Documents, cloud folders and external drives. If it finds them, they open right where they are and nothing is copied. A browser never tells a page where dropped files live, so if StockUp can't find them, it copies them into a new folder in *Pictures › StockUp Batches* and leaves your originals where they were.
+- **Choose a folder…** opens your folder directly, with nothing copied.
+- **Drop a folder or photos onto the StockUp app icon,** in the Dock or Finder on a Mac, or on StockUp.exe on Windows. These open in place too.
 
 ## What it does for you
 
@@ -41,6 +48,7 @@ StockUp asks which folder holds your batch, then opens in your web browser. Noth
 - **Shuffles the upload order** and keeps look-alike photos apart, so reviewers don't see a run of near-identical frames. Each site gets its own order.
 - **Fills in Dreamstime too:** titles, keywords, up to three categories, and the editorial flag, sent to Dreamstime with one button.
 - **Keeps your passwords in your computer's keychain:** Keychain on Mac, Credential Manager on Windows.
+- **Opens without a folder.** A welcome screen lists your recent batches, and **Another batch** switches batches without restarting.
 - **Light and dark mode,** and an **Update** button when a new version is out.
 
 | Check photos | One photo, site by site |
@@ -80,7 +88,7 @@ StockUp asks which folder holds your batch, then opens in your web browser. Noth
 
 ## Each batch
 
-1. Open StockUp and choose the batch folder.
+1. Open StockUp, then drop in your photos or choose the batch folder.
 2. The first time, open **Settings** and tick the sites you sell on. Then open **Logins** and add each one.
 3. Pick photos and click **Editorial** or **Creative**. Check the categories StockUp picked (change any you like), and add the place and date for editorial shots.
 4. Open **Check photos** and apply the fixes you want.

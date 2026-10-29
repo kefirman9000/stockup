@@ -61,7 +61,7 @@ jobs:
       - name: Build (Mac)
         if: runner.os == 'macOS'
         run: |
-          pyinstaller --noconfirm --windowed --name StockUp \
+          pyinstaller --noconfirm --windowed --name StockUp --argv-emulation \
             --osx-bundle-identifier io.github.kefirman9000.stockup \
             --copy-metadata keyring --hidden-import keyring.backends.macOS stockup.py
           ./dist/StockUp.app/Contents/MacOS/StockUp --selftest selftest.txt || (cat selftest.txt; exit 1)
