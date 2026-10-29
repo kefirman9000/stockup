@@ -1,0 +1,65 @@
+# Builds the app and opens StockUp's real window, recording when each startup step
+# happens. Run it by hand (Actions > Window check > Run workflow); nothing is published.
+name: Window check
+on:
+  workflow_dispatch:
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pyinstaller pillow keyring paramiko pywebview
+      - name: Mac
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --noconfirm --windowed --name StockUp --argv-emulation \
+            --osx-bundle-identifier io.github.kefirman9000.stockup \
+            --copy-metadata keyring --hidden-import keyring.backends.macOS stockup.py > /dev/null 2>&1
+          for run in first second; do
+            rm -f window.txt
+            t0=$(python3 -c 'import time; print(time.time())')
+            STOCKUP_WINDOW_CHECK="$PWD/window.txt" ./dist/StockUp.app/Contents/MacOS/StockUp &
+            pid=$!
+            for i in $(seq 1 240); do [ -s window.txt ] && break; sleep 0.25; done
+            t1=$(python3 -c 'import time; print(time.time())')
+            sleep 1; kill $pid 2>/dev/null || true
+            took=$(python3 -c "print(f'{$t1-$t0:.1f}')")
+            steps=$(grep '^step' window.txt | sed 's/^step: *//' | tr '\n' ';')
+            echo "::notice title=Mac $run launch (${took}s total)::$steps"
+          done
+          # the same check run as a script, to separate the app bundle from StockUp itself
+          rm -f window.txt
+          t0=$(python3 -c 'import time; print(time.time())')
+          STOCKUP_WINDOW_CHECK="$PWD/window.txt" python stockup.py &
+          pid=$!
+          for i in $(seq 1 240); do [ -s window.txt ] && break; sleep 0.25; done
+          t1=$(python3 -c 'import time; print(time.time())')
+          sleep 1; kill $pid 2>/dev/null || true
+          took=$(python3 -c "print(f'{$t1-$t0:.1f}')")
+          steps=$(grep '^step' window.txt | sed 's/^step: *//' | tr '\n' ';')
+          echo "::notice title=Mac as a script (${took}s total)::$steps"
+      - name: Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --windowed --name StockUp `
+            --copy-metadata keyring --hidden-import keyring.backends.Windows stockup.py | Out-Null
+          foreach ($run in @("first", "second")) {
+            Remove-Item window.txt -ErrorAction SilentlyContinue
+            $env:STOCKUP_WINDOW_CHECK = "$PWD\window.txt"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $p = Start-Process -FilePath dist\StockUp\StockUp.exe -PassThru
+            while (-not (Test-Path window.txt) -and $sw.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Milliseconds 200 }
+            Start-Sleep -Milliseconds 300
+            $s = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+            $steps = ((Get-Content window.txt -ErrorAction SilentlyContinue) | Where-Object { $_ -like 'step*' } | ForEach-Object { $_ -replace '^step: *','' }) -join ';'
+            echo "::notice title=Windows $run launch (${s}s total)::$steps"
+            Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
+          }
