@@ -1,0 +1,5 @@
+stockup_sites.ini
+stockup_options.json
+*.bak
+*.new
+__pycache__/
