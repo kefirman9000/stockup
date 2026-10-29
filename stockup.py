@@ -37,11 +37,12 @@ import unicodedata
 import webbrowser
 import xml.etree.ElementTree as ET
 from datetime import datetime
+import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 STARTED = time.time()
@@ -4068,18 +4069,29 @@ def main(argv):
         return 0
 
 
+class LocalServer(ThreadingHTTPServer):
+    """StockUp's built-in server, for its own window only. Python's standard server looks up
+    the network name of 127.0.0.1 when it starts, which on some Macs hangs for 30+ seconds
+    before giving up. StockUp doesn't need that name, so it skips the lookup."""
+    daemon_threads = True
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "localhost", self.server_address[1]
+
+
 def start_server(app):
     restarting = os.environ.pop("STOCKUP_PORT", "")
     port = int(restarting) if restarting.isdigit() else 0
     server = None
     for _ in range(20):
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app))
+            server = LocalServer(("127.0.0.1", port), make_handler(app))
             break
         except OSError:
             time.sleep(0.25)
     if server is None:
-        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
+        server = LocalServer(("127.0.0.1", 0), make_handler(app))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 

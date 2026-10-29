@@ -164,7 +164,7 @@ def test_choose_buttons_use_the_computers_own_windows(stockup, fake_webview, tmp
     app = stockup.App()
     stockup.open_window(app, "u")
     w = fake_webview["window"]
-    server = stockup.ThreadingHTTPServer(("127.0.0.1", 0), stockup.make_handler(app))
+    server = stockup.LocalServer(("127.0.0.1", 0), stockup.make_handler(app))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{server.server_address[1]}"
     post = lambda p: json.loads(urllib.request.urlopen(
