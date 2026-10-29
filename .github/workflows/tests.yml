@@ -1,0 +1,26 @@
+# Runs StockUp's tests on Mac, Windows and Linux after every change.
+# The release workflow also runs this first, and won't publish if any test fails.
+name: Tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install pillow pytest
+      - name: Run the tests
+        run: python -m pytest -v

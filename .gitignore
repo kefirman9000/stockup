@@ -3,3 +3,4 @@ stockup_options.json
 *.bak
 *.new
 __pycache__/
+.pytest_cache/
