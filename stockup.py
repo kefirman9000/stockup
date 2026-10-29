@@ -41,7 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 
@@ -591,11 +591,15 @@ def jpeg_quality(dqt):
             return None
         vals = [int.from_bytes(table[k:k + 2], "big") for k in range(0, 128, 2)] if pq else list(table)
         if tq == 0:
-            scale = sum(vals) * 100 / _STD_LUMA_SUM
-            q = (200 - scale) / 2 if scale <= 100 else 5000 / scale
-            return max(1, min(100, round(q)))
+            return quality_from_table(vals)
         i += 1 + size
     return None
+
+
+def quality_from_table(vals):
+    scale = sum(vals) * 100 / _STD_LUMA_SUM
+    q = (200 - scale) / 2 if scale <= 100 else 5000 / scale
+    return max(1, min(100, round(q)))
 
 
 def read_photo(path):
@@ -1554,14 +1558,14 @@ class Batch:
 # --------------------------------------------------------------------------
 
 def _meta_segments(src_bytes):
-    """Raw EXIF/XMP/IPTC segments of a JPEG, to carry over to a new copy."""
+    """Raw EXIF/XMP/IPTC segments and comments of a JPEG, to carry over to a new copy."""
     segs, i = [], 2
     while i + 4 <= len(src_bytes) and src_bytes[i] == 0xFF:
         marker = src_bytes[i + 1]
         if marker in (0xDA, 0xD9):
             break
         ln = int.from_bytes(src_bytes[i + 2:i + 4], "big")
-        if marker in (0xE1, 0xED):
+        if marker in (0xE1, 0xED, 0xFE):  # EXIF + XMP, IPTC, comments
             segs.append(src_bytes[i:i + 2 + ln])
         i += 2 + ln
     return b"".join(segs)
@@ -1631,24 +1635,40 @@ def make_copy(src, dst, ops, rules, scale=1.0):
             fh.write(data)
         os.replace(tmp, dst)
         return
-    from PIL import Image
+    from PIL import Image, JpegImagePlugin
     im = Image.open(BytesIO(raw))
     icc = im.info.get("icc_profile")
-    out_icc = None
-    if "srgb" in ops or im.mode not in ("RGB",):
+    # Save the copy no worse than the original: the same colour detail (chroma subsampling),
+    # and quality 95 or the original's own quality, whichever is higher.
+    try:
+        sampling = JpegImagePlugin.get_sampling(im)
+    except Exception:
+        sampling = -1
+    sampling = sampling if sampling in (0, 1, 2) else 0
+    q_tables = getattr(im, "quantization", None) or {}
+    orig_q = quality_from_table(list(q_tables[0])) if 0 in q_tables and len(q_tables[0]) == 64 else 95
+    best_q = min(100, max(95, orig_q))
+
+    if "srgb" in ops or im.mode not in ("RGB", "L"):
         from PIL import ImageCms
         srgb = ImageCms.createProfile("sRGB")
         if icc and im.mode in ("RGB", "CMYK", "L"):
+            # Relative colorimetric with black point compensation: Photoshop's default,
+            # so colours move as little as possible
+            intent = getattr(getattr(ImageCms, "Intent", None), "RELATIVE_COLORIMETRIC",
+                             getattr(ImageCms, "INTENT_RELATIVE_COLORIMETRIC", 1))
+            flags = getattr(getattr(ImageCms, "Flags", None), "BLACKPOINTCOMPENSATION",
+                            getattr(ImageCms, "FLAGS", {}).get("BLACKPOINTCOMPENSATION", 0x2000))
             try:
-                im = ImageCms.profileToProfile(im, ImageCms.ImageCmsProfile(BytesIO(icc)),
-                                               srgb, outputMode="RGB")
+                im = ImageCms.profileToProfile(im, ImageCms.ImageCmsProfile(BytesIO(icc)), srgb,
+                                               renderingIntent=intent, outputMode="RGB", flags=flags)
             except Exception:
                 im = im.convert("RGB")
         else:
             im = im.convert("RGB")
         out_icc = ImageCms.ImageCmsProfile(srgb).tobytes()
     else:
-        out_icc = icc
+        out_icc = icc  # RGB stays RGB, black and white stays black and white
     if "downscale" in ops and scale < 1:
         im = im.resize((max(1, round(im.width * scale)), max(1, round(im.height * scale))),
                        Image.LANCZOS)
@@ -1658,24 +1678,29 @@ def make_copy(src, dst, ops, rules, scale=1.0):
             k = math.sqrt(rules["max_px"] / px) * 0.995
             im = im.resize((int(im.width * k), int(im.height * k)), Image.LANCZOS)
     segs = _meta_segments(raw)
-    limit = rules.get("max_mb", 10_000) * 1048576 if "smaller" in ops else None
-    data = None
-    for q in (95, 92, 89, 86, 83, 80):
+
+    def encode(img, quality, sub):
         buf = BytesIO()
-        kw = {"quality": q, "progressive": False, "optimize": True}
+        kw = {"quality": quality, "progressive": False, "optimize": True}
+        if img.mode == "RGB":
+            kw["subsampling"] = sub
         if out_icc:
             kw["icc_profile"] = out_icc
-        im.save(buf, "JPEG", **kw)
-        data = _insert_segments(buf.getvalue(), segs)
-        if limit is None or len(data) <= limit:
-            break
-    if limit and len(data) > limit:  # still too big at quality 80: scale down a little
-        while len(data) > limit:
+        img.save(buf, "JPEG", **kw)
+        return _insert_segments(buf.getvalue(), segs)
+
+    data = encode(im, best_q, sampling)
+    if "smaller" in ops:  # only when a site's file-size limit needs it: step down gently
+        limit = rules.get("max_mb", 10_000) * 1048576
+        steps = [(q, sampling) for q in (93, 90, 87, 84) if q < best_q] + \
+                [(q, 2) for q in (90, 85, 80) if sampling != 2]
+        for q, sub in steps:
+            if len(data) <= limit:
+                break
+            data = encode(im, q, sub)
+        while len(data) > limit:  # still too big: make it a little smaller
             im = im.resize((int(im.width * 0.9), int(im.height * 0.9)), Image.LANCZOS)
-            buf = BytesIO()
-            im.save(buf, "JPEG", quality=85, progressive=False, optimize=True,
-                    **({"icc_profile": out_icc} if out_icc else {}))
-            data = _insert_segments(buf.getvalue(), segs)
+            data = encode(im, 85, 2)
     if "nogps" in ops:
         data = strip_gps_bytes(data)
     tmp = dst + ".part"

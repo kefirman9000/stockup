@@ -127,3 +127,67 @@ def test_logins_file_is_private(stockup):
     stockup.save_logins({"shutterstock": {"username": "me", "password": "secret"}})
     if os.name != "nt":
         assert os.stat(stockup.CONFIG_PATH).st_mode & 0o077 == 0
+
+
+# ---- adjusted copies (only when you allow them) are as faithful as possible ----
+
+def _sampling(path):
+    from PIL import JpegImagePlugin
+    return JpegImagePlugin.get_sampling(Image.open(path))
+
+
+def test_adjusted_copies_keep_colour_detail_quality_and_metadata(stockup, batch_dir):
+    from helpers import inject
+    p = make_photo(batch_dir, "a.jpg", size=(6000, 4000), quality=97)
+    Image.open(p).save(p, quality=97, subsampling=0, icc_profile=Image.open(p).info.get("icc_profile"),
+                       exif=Image.open(p).getexif().tobytes())
+    from helpers import xmp_segment
+    inject(p, xmp_segment("Kept title", "Kept description", ["kept"]), 0xE1)
+    inject(p, b"a comment from the camera", 0xFE)
+    out = f"{batch_dir}/copy.jpg"
+    stockup.make_copy(p, out, {"downscale"}, {}, scale=0.5)
+    m, _ = stockup.read_photo(out)
+    assert _sampling(out) == 0                      # full colour detail, like the original
+    assert m["info"]["quality"] >= 95
+    assert (m["title"], m["keywords"]) == ("Kept title", ["kept"])
+    assert b"a comment from the camera" in open(out, "rb").read()
+    assert (m["info"]["width"], m["info"]["height"]) == (3000, 2000)
+
+
+def test_a_low_quality_original_is_never_saved_lower(stockup, batch_dir):
+    p = make_photo(batch_dir, "a.jpg", quality=70)
+    out = f"{batch_dir}/copy.jpg"
+    stockup.make_copy(p, out, {"downscale"}, {}, scale=0.8)
+    assert stockup.read_photo(out)[0]["info"]["quality"] >= 95
+
+
+def test_black_and_white_stays_black_and_white_when_resized(stockup, batch_dir):
+    p = f"{batch_dir}/bw.jpg"
+    Image.new("L", (4000, 3000), 128).save(p, quality=95)
+    out = f"{batch_dir}/copy.jpg"
+    stockup.make_copy(p, out, {"downscale"}, {}, scale=0.5)
+    assert Image.open(out).mode == "L"
+
+
+def test_srgb_copies_use_relative_colorimetric(stockup, batch_dir):
+    from PIL import ImageCms
+    from io import BytesIO
+    p = make_photo(batch_dir, "a.jpg", icc=ADOBE_ICC, quality=100)
+    out = f"{batch_dir}/copy.jpg"
+    stockup.make_copy(p, out, {"srgb"}, {})
+    src = Image.open(p)
+    want = ImageCms.profileToProfile(src, ImageCms.ImageCmsProfile(BytesIO(src.info["icc_profile"])),
+                                     ImageCms.createProfile("sRGB"),
+                                     renderingIntent=ImageCms.Intent.RELATIVE_COLORIMETRIC,
+                                     outputMode="RGB", flags=ImageCms.Flags.BLACKPOINTCOMPENSATION)
+    got = Image.open(out).convert("RGB")
+    diff = sum(abs(a - b) for a, b in zip(got.resize((60, 40)).tobytes(), want.resize((60, 40)).tobytes()))
+    assert diff / (60 * 40 * 3) < 2.5  # same colours, apart from JPEG rounding
+    assert stockup.read_photo(out)[0]["info"]["color"] == "sRGB"
+
+
+def test_smaller_copies_still_fit_a_sites_limit(stockup, batch_dir):
+    p = make_photo(batch_dir, "big.jpg", size=(3000, 2000), noise=True, quality=98)
+    out = f"{batch_dir}/copy.jpg"
+    stockup.make_copy(p, out, {"smaller"}, {"max_mb": 2})
+    assert os.path.getsize(out) <= 2 * 1048576
