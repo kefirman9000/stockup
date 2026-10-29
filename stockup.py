@@ -42,7 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.6.1"
+VERSION = "1.7.0"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 STARTED = time.time()
@@ -2596,21 +2596,39 @@ def check_update(force=False):
             "available": bool(latest) and _vtuple(latest) > _vtuple(VERSION),
             "notes": (rel.get("body") or "").strip()[:1500],
             "url": rel.get("html_url", ""), "asset": assets.get("stockup.py"),
+            "app_asset": assets.get(APP_ASSET), "sums": assets.get("SHA256SUMS"),
             "download": assets.get(APP_ASSET) or rel.get("html_url", ""),
             "tag": rel.get("tag_name", "")}
+    data["can_update_itself"] = not update_blocker(installed_app()) if FROZEN else True
     _update_cache.update(t=time.time(), data=data)
     return data
 
 
+def published_fingerprints(info):
+    """The SHA-256 fingerprints published with a release: {file name: fingerprint}."""
+    if not info.get("sums"):
+        return {}
+    out = {}
+    for line in _http_get(info["sums"], timeout=30).decode("utf-8", "replace").splitlines():
+        parts = line.strip().split()
+        if len(parts) == 2 and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
+            out[parts[1].lstrip("*")] = parts[0].lower()
+    return out
+
+
 def install_update():
-    """Download the latest stockup.py, check it, keep a backup, swap it in."""
+    """Script version: download the latest stockup.py, check it, keep a backup, swap it in."""
     if FROZEN:
-        raise RuntimeError("The app updates by downloading the new version from GitHub.")
+        raise RuntimeError("The app updates itself with Update now.")
     info = check_update(force=True)
     if not info["available"]:
         return {"updated": False, "message": f"You already have the latest version ({VERSION})."}
     url = info["asset"] or f"https://raw.githubusercontent.com/{REPO}/{info['tag']}/stockup.py"
     src = _http_get(url, timeout=60)
+    sums = published_fingerprints(info)
+    if "stockup.py" in sums and hashlib.sha256(src).hexdigest() != sums["stockup.py"]:
+        raise RuntimeError("The download doesn't match the release's fingerprint. Nothing was "
+                           "changed; try again later.")
     text = src.decode("utf-8")
     try:
         compile(text, "stockup.py", "exec")
@@ -2627,6 +2645,221 @@ def install_update():
     os.replace(tmp, me)
     return {"updated": True, "version": info["latest"],
             "message": f"Updated to {info['latest']}. Your previous version is saved as stockup.py.bak."}
+
+
+# ---- the Mac and Windows apps update themselves --------------------------------
+
+def installed_app():
+    """Where this app lives: ("mac", the StockUp.app bundle) or ("win", the StockUp folder).
+    None when StockUp is running as a script."""
+    if not FROZEN:
+        return None
+    exe = os.path.abspath(sys.executable)
+    if sys.platform == "darwin":
+        p = exe
+        while p and p != os.path.dirname(p) and not p.endswith(".app"):
+            p = os.path.dirname(p)
+        return ("mac", p) if p.endswith(".app") else None
+    if os.name == "nt":
+        return ("win", os.path.dirname(exe))
+    return None
+
+
+def update_blocker(loc):
+    """Why this copy can't replace itself ("" when it can)."""
+    if not loc:
+        return "This copy of StockUp can't update itself. Download the new version instead."
+    kind, path = loc
+    if kind == "mac" and "/AppTranslocation/" in path:
+        return ("macOS is running StockUp from a temporary place because it's still in the "
+                "folder it was unzipped to. Drag StockUp into your Applications folder, open it "
+                "from there, and then update.")
+    parent = os.path.dirname(path)
+    if not (os.access(parent, os.W_OK) and os.access(path, os.W_OK)):
+        return (f"StockUp doesn't have permission to replace itself in {parent}. "
+                f"Download the new version instead, or move StockUp somewhere you can change.")
+    return ""
+
+
+MAC_SWAP = r'''#!/bin/bash
+# StockUp update: wait for StockUp to quit, swap in the new version, keep the old one, reopen.
+pid="$1"; old="$2"; new="$3"; backup="$4"; shift 4
+for i in $(seq 1 600); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+sleep 0.3
+rm -rf "$backup"; mkdir -p "$(dirname "$backup")"
+if mv "$old" "$backup"; then
+  if ! mv "$new" "$old"; then mv "$backup" "$old"; fi
+fi
+"$@" >/dev/null 2>&1 &
+'''
+
+WIN_SWAP = r'''param([int]$WaitPid, [string]$Old, [string]$New, [string]$Backup, [string]$Launch, [string]$Arg)
+# StockUp update: wait for StockUp to quit, swap in the new version, keep the old one, reopen.
+try { Wait-Process -Id $WaitPid -Timeout 120 -ErrorAction SilentlyContinue } catch {}
+Start-Sleep -Milliseconds 500
+function Retry([scriptblock]$Do) {
+  for ($i = 0; $i -lt 40; $i++) { try { & $Do; return $true } catch { Start-Sleep -Milliseconds 500 } }
+  return $false
+}
+if (Test-Path -LiteralPath $Backup) { Retry { Remove-Item -LiteralPath $Backup -Recurse -Force -ErrorAction Stop } | Out-Null }
+if (Retry { Move-Item -LiteralPath $Old -Destination $Backup -ErrorAction Stop }) {
+  if (-not (Retry { Move-Item -LiteralPath $New -Destination $Old -ErrorAction Stop })) {
+    Retry { Move-Item -LiteralPath $Backup -Destination $Old -ErrorAction Stop } | Out-Null
+  }
+}
+if (-not $Launch) { $Launch = Join-Path $Old 'StockUp.exe' }
+if ($Arg) { Start-Process -FilePath $Launch -ArgumentList ('"' + $Arg + '"') } else { Start-Process -FilePath $Launch }
+'''
+
+
+def _app_exe(kind, path):
+    return os.path.join(path, "Contents", "MacOS", "StockUp") if kind == "mac" \
+        else os.path.join(path, "StockUp.exe")
+
+
+class AppUpdater:
+    """Downloads, checks and installs a new version of the app, then reopens StockUp."""
+
+    def __init__(self):
+        self.state = {"stage": "idle", "done": 0, "total": 0, "error": "", "version": ""}
+        self.running = False
+
+    def start(self, app):
+        if self.running:
+            return
+        self.running = True
+        self.state = {"stage": "starting", "done": 0, "total": 0, "error": "", "version": ""}
+        threading.Thread(target=self._run, args=(app,), daemon=True).start()
+
+    def _fail(self, msg):
+        self.state.update(stage="error", error=msg)
+        self.running = False
+
+    def _run(self, app):
+        try:
+            self._update(app)
+        except Exception as e:
+            self._fail(f"The update didn't finish, and nothing was changed ({e}).")
+
+    def _update(self, app):
+        info = check_update(force=True)
+        if not info["available"]:
+            return self._fail(f"You already have the latest version ({VERSION}).")
+        loc = installed_app()
+        why = update_blocker(loc)
+        if why:
+            return self._fail(why)
+        kind, path = loc
+        if not info.get("app_asset"):
+            return self._fail("This release has no app for your computer yet. Try again later.")
+        sums = published_fingerprints(info)
+        if APP_ASSET not in sums:
+            return self._fail("This release has no fingerprint to check the download against, so "
+                              "StockUp won't install it. Download it yourself instead.")
+        self.state["version"] = info["latest"]
+
+        # 1. download, next to where it will be installed (so the swap is a quick move)
+        work = os.path.join(CONF_DIR, "update") if kind == "mac" \
+            else os.path.join(os.path.dirname(path), "StockUp-update")
+        if os.path.isdir(os.path.join(work, "new")):
+            shutil.rmtree(os.path.join(work, "new"), ignore_errors=True)
+        os.makedirs(work, exist_ok=True)
+        zpath = os.path.join(work, APP_ASSET)
+        self.state.update(stage="downloading")
+        h = hashlib.sha256()
+        import urllib.request
+        req = urllib.request.Request(info["app_asset"], headers={"User-Agent": f"StockUp/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=60) as r, open(zpath + ".part", "wb") as fh:
+            self.state["total"] = int(r.headers.get("Content-Length") or 0)
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                h.update(chunk)
+                self.state["done"] += len(chunk)
+        os.replace(zpath + ".part", zpath)
+
+        # 2. check it's exactly what was published
+        self.state.update(stage="checking")
+        if h.hexdigest() != sums[APP_ASSET]:
+            os.remove(zpath)
+            return self._fail("The download doesn't match the release's fingerprint, so it wasn't "
+                              "installed. Nothing was changed; try again later.")
+        new_root = os.path.join(work, "new")
+        os.makedirs(new_root)
+        if kind == "mac" and sys.platform == "darwin":  # ditto keeps the bundle's links and permissions
+            import subprocess
+            subprocess.run(["ditto", "-x", "-k", zpath, new_root], check=True, timeout=600)
+            subprocess.run(["xattr", "-dr", "com.apple.quarantine", new_root], timeout=120)
+        else:
+            import zipfile
+            with zipfile.ZipFile(zpath) as z:
+                z.extractall(new_root)
+        new_app = os.path.join(new_root, os.path.basename(path) if kind == "mac" else "StockUp")
+        if not os.path.exists(new_app):
+            found = [d for d in os.listdir(new_root) if not d.startswith(".")]
+            new_app = os.path.join(new_root, found[0]) if len(found) == 1 else new_app
+        if not os.path.exists(_app_exe(kind, new_app)):
+            return self._fail("The download didn't contain the app. Nothing was changed.")
+        got = app_version(_app_exe(kind, new_app), work)
+        if _vtuple(got) != _vtuple(info["latest"]):
+            return self._fail(f"The new app reports version {got or 'unknown'} instead of "
+                              f"{info['latest']}, so it wasn't installed. Nothing was changed.")
+        os.remove(zpath)
+
+        # 3. swap it in once StockUp has quit, then reopen on the same batch
+        self.state.update(stage="restarting")
+        if app.batch:
+            app.batch.save()
+        folder = app.batch.folder if app.batch else ""
+        backup = os.path.join(work, "previous", os.path.basename(path))
+        launch_swap(kind, path, new_app, backup, folder)
+        if app.window:
+            threading.Timer(0.3, app.window.destroy).start()
+        threading.Timer(1.0, lambda: os._exit(0)).start()
+
+
+def app_version(exe, work):
+    """Ask an app which version it is (it writes the answer to a file)."""
+    import subprocess
+    out = os.path.join(work, "version.txt")
+    if os.path.exists(out):
+        os.remove(out)
+    try:
+        subprocess.run([exe, "--version-to", out], timeout=120)
+        with open(out, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except Exception:
+        return ""
+
+
+def launch_swap(kind, old, new, backup, folder):
+    """Start the small helper that swaps versions after StockUp quits."""
+    import subprocess
+    test_launch = os.environ.get("STOCKUP_TEST_RELAUNCH")  # used by the tests only
+    wait_pid = os.environ.get("STOCKUP_TEST_WAITPID") or str(os.getpid())
+    os.makedirs(os.path.dirname(backup), exist_ok=True)
+    if kind == "mac" or os.name != "nt":
+        script = os.path.join(os.path.dirname(os.path.dirname(backup)), "swap.sh")
+        with open(script, "w") as fh:
+            fh.write(MAC_SWAP)
+        relaunch = test_launch.split("\x1f") if test_launch else \
+            (["open", "-n", old] + (["--args", folder] if folder else []))
+        subprocess.Popen(["/bin/bash", script, wait_pid, old, new, backup] + relaunch,
+                         start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        script = os.path.join(os.path.dirname(os.path.dirname(backup)), "swap.ps1")
+        with open(script, "w", encoding="utf-8-sig") as fh:
+            fh.write(WIN_SWAP)
+        launch, arg = (test_launch.split("\x1f") + [""])[:2] if test_launch else ("", folder)
+        flags = 0x00000008 | 0x00000200 | 0x08000000  # detached, own group, no console window
+        subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                          "-WindowStyle", "Hidden", "-File", script, "-WaitPid", wait_pid,
+                          "-Old", old, "-New", new, "-Backup", backup, "-Launch", launch,
+                          "-Arg", arg], creationflags=flags, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def restart_program(server, folder):
@@ -3230,22 +3463,43 @@ function uploadDetails(){
 /* updates */
 async function checkUpdate(manual){
   try{const u=await api('/api/version'+(manual?'?force=1':''));
-    if(u.available){$('banner').style.display='block';
-      $('banner').innerHTML=u.frozen
-        ?`StockUp ${esc(u.latest)} is available (you have ${esc(u.current)}). <a href="${esc(u.download)}" class="primary" target="_blank" rel="noopener"><button class="primary">Download</button></a> Then quit this one and open the new app. <a href="${esc(u.url)}" target="_blank" rel="noopener" class="hint">What’s new</a>`
-        :`StockUp ${esc(u.latest)} is available (you have ${esc(u.current)}). <button class="primary" onclick="doUpdate()">Update now</button> <a href="${esc(u.url)}" target="_blank" rel="noopener" class="hint">What’s new</a>`;
+    if(u.available){
+      $('banner').style.display='block';
+      const notes=`<a href="${esc(u.url)}" target="_blank" rel="noopener" class="hint">What’s new</a>`;
+      if(u.frozen&&!u.can_update_itself)
+        $('banner').innerHTML=`StockUp ${esc(u.latest)} is available (you have ${esc(u.current)}). <a href="${esc(u.download)}" target="_blank" rel="noopener"><button class="primary">Download</button></a> ${notes}
+          <button class="link" onclick="$('banner').style.display='none'">Later</button>`;
+      else
+        $('banner').innerHTML=`StockUp ${esc(u.latest)} is available (you have ${esc(u.current)}). <button class="primary" onclick="doUpdate()">Update now</button> ${notes}
+          <button class="link" onclick="$('banner').style.display='none'">Later</button>
+          <div class="hint">${u.frozen?'StockUp downloads it, checks it, installs it and reopens on this batch. Your current version is kept as a backup.':'StockUp updates itself and reopens. Your current version is kept as stockup.py.bak.'}</div>`;
       if(manual)closePanel();}
     else if(manual)note(`You have the latest version (${u.current}).`);}
   catch(e){if(manual)note(e.message)}
 }
+let upPoll=null;
 async function doUpdate(){
-  await save();$('banner').textContent='Updating…';
+  if(lastStatus&&lastStatus.running)return alert('Wait for the upload to finish, then update.');
+  await save();
   try{const r=await api('/api/update',{});
+    if(r.started){clearInterval(upPoll);upPoll=setInterval(updateStatus,600);return updateStatus()}
     if(!r.updated){$('banner').textContent=r.message;return}
     $('banner').textContent=r.message+' Restarting…';
     for(let i=0;i<30;i++){await new Promise(z=>setTimeout(z,1000));try{const v=await api('/api/version');if(v.current==r.version){location.reload();return}}catch(e){}}
-    $('banner').textContent='Updated. Close this tab and start StockUp again.';}
+    $('banner').textContent='Updated. Close StockUp and open it again.';}
   catch(e){$('banner').textContent=e.message}
+}
+async function updateStatus(){
+  let s;try{s=await api('/api/update_status')}catch(e){return}  // StockUp quitting to restart
+  const b=$('banner');b.style.display='block';
+  const mb=x=>(x/1048576).toFixed(0);
+  if(s.stage=='error'){clearInterval(upPoll);
+    b.innerHTML=`${esc(s.error)} <button class="link" onclick="checkUpdate(true)">Try again</button>`;return}
+  const pct=s.total?100*s.done/s.total:0;
+  const what={starting:'Getting ready…',downloading:`Downloading StockUp ${esc(s.version)}… ${mb(s.done)}${s.total?' of '+mb(s.total):''} MB`,
+    checking:'Checking the download matches the release…',restarting:'Installing and reopening StockUp. This takes a few seconds…'}[s.stage]||'Updating…';
+  b.innerHTML=`<b>${what}</b><div class="prog"><i style="width:${s.stage=='downloading'?pct:100}%"></i></div>`;
+  if(s.stage=='restarting')clearInterval(upPoll);
 }
 async function another(){
   await save();
@@ -3615,6 +3869,7 @@ class App:
         self.last_ping = time.time()
         self.closed_at = None  # when the page said it was closing
         self.window = None     # StockUp's own window, when there is one
+        self.updater = AppUpdater()
         self.page_ready_at = None
         if batch:
             self.set_batch(batch)
@@ -3752,6 +4007,8 @@ def make_handler(app):
                     return self._send(200, logins_summary())
                 if p == "/api/status":
                     return self._send(200, app.status())
+                if p == "/api/update_status":
+                    return self._send(200, app.updater.state)
                 if p == "/api/build_status":
                     return self._send(200, app.build_state)
                 if p == "/api/ping":
@@ -3905,6 +4162,9 @@ def make_handler(app):
                     if app.busy():
                         return self._send(200, {"updated": False,
                                                 "message": "Wait for the upload to finish, then update."})
+                    if FROZEN:  # the app: download, check, install, reopen
+                        app.updater.start(app)
+                        return self._send(200, {"started": True})
                     r = install_update()
                     self._send(200, r)
                     if r.get("updated"):
@@ -4005,6 +4265,10 @@ def main(argv):
                 fh.write(folder or "")
         else:
             print(folder or "")
+        return 0
+    if len(argv) > 2 and argv[1] == "--version-to":  # used by the updater to check a new app
+        with open(argv[2], "w", encoding="utf-8") as fh:
+            fh.write(VERSION)
         return 0
     if len(argv) > 1 and argv[1] == "--selftest":
         return self_test(argv[2] if len(argv) > 2 else "selftest.txt")
