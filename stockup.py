@@ -37,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 
@@ -93,8 +93,9 @@ SITES = {
     "dreamstime": {
         "label": "Dreamstime", "short": "DT",
         "ftp": {"protocol": "ftp", "host": "upload.dreamstime.com", "port": 21},
-        "login_hint": "Your numeric Dreamstime account ID, and your Dreamstime password.",
-        "min_px": 3_000_000, "min_label": "3 MP", "max_px": 70_000_000,
+        "login_hint": "Your Dreamstime user ID (the number shown on Dreamstime's FTP page), "
+                      "and your Dreamstime account password.",
+        "min_px": 3_000_000, "min_label": "3 MP", "max_mb": 1024, "min_quality": 90,
         "csv_note": "Dreamstime reads your titles and keywords from the photos. "
                     "Tick editorial for the files in editorial_list.txt.",
     },
@@ -449,6 +450,33 @@ def color_kind(name, space, components):
     return name
 
 
+# Standard JPEG luminance table (ITU T.81, Annex K). Its sum tells us how hard a
+# photo was compressed, whatever order the camera or app stored the table in.
+_STD_LUMA_SUM = sum([
+    16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55,
+    14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62,
+    18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92,
+    49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99])
+
+
+def jpeg_quality(dqt):
+    """Rough 1-100 JPEG quality from the first luminance table (None if unknown)."""
+    i = 0
+    while i < len(dqt):
+        pq, tq = dqt[i] >> 4, dqt[i] & 0x0F
+        size = 128 if pq else 64
+        table = dqt[i + 1:i + 1 + size]
+        if len(table) < size:
+            return None
+        vals = [int.from_bytes(table[k:k + 2], "big") for k in range(0, 128, 2)] if pq else list(table)
+        if tq == 0:
+            scale = sum(vals) * 100 / _STD_LUMA_SUM
+            q = (200 - scale) / 2 if scale <= 100 else 5000 / scale
+            return max(1, min(100, round(q)))
+        i += 1 + size
+    return None
+
+
 def read_photo(path):
     xmp, iptc, exif_date, thumb = {}, {}, "", None
     info = {"width": 0, "height": 0, "components": 3, "progressive": False}
@@ -461,6 +489,10 @@ def read_photo(path):
                 exif_date, thumb = parse_exif(payload)
             elif marker == 0xED:
                 iptc = parse_iptc(payload)
+            elif marker == 0xDB and "quality" not in info:
+                q = jpeg_quality(payload)
+                if q:
+                    info["quality"] = q
             elif marker == 0xE2 and payload.startswith(b"ICC_PROFILE\x00"):
                 icc += payload[14:]
             elif marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
@@ -719,6 +751,10 @@ class Batch:
                          f"colors can shift.", "srgb")
         elif rules.get("srgb") == "pond5" and color not in ("sRGB", "untagged", "Adobe RGB"):
             issue("fix", f"Color profile is {color}. Pond5 takes sRGB or Adobe RGB.", "srgb")
+        if rules.get("min_quality") and info.get("quality", 100) < rules["min_quality"]:
+            issue("warn", f"Saved at about JPEG quality {info['quality']}. {rules['label']} asks "
+                          f"for best-quality compression. Re-export at 100% (or 12 in Photoshop); "
+                          f"saving this file again can't bring the detail back.")
         if rules.get("baseline") and info.get("progressive"):
             issue("fix", "Saved as a progressive JPEG. Alamy asks for standard (baseline) JPEGs "
                          "to avoid processing errors.", "baseline")
