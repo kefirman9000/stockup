@@ -1,10 +1,11 @@
-# Publishes a release (with stockup.py attached) whenever a version tag is pushed,
-# e.g.  git tag v1.2.0 && git push origin v1.2.0
-# StockUp's Update button installs the newest of these releases.
+# Publishes a release (with stockup.py attached) whenever the VERSION line in
+# stockup.py changes on main. StockUp's Update button installs the newest one.
 name: Release
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths: ["stockup.py"]
+  workflow_dispatch:
 permissions:
   contents: write
 jobs:
@@ -12,15 +13,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check the version number matches the tag
+      - name: Read the version
+        id: v
         run: |
-          v=$(grep -m1 '^VERSION = ' stockup.py | cut -d'"' -f2)
-          [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "stockup.py says $v but the tag is ${GITHUB_REF_NAME}"; exit 1; }
           python3 -m py_compile stockup.py
-      - name: Publish the release
+          echo "tag=v$(grep -m1 '^VERSION = ' stockup.py | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - name: Publish the release if it's new
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" stockup.py \
-            --title "StockUp ${GITHUB_REF_NAME#v}" \
-            --notes-file .github/release-notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG is already released"; exit 0
+          fi
+          gh release create "$TAG" stockup.py --target "$GITHUB_SHA" \
+            --title "StockUp ${TAG#v}" --notes-file .github/release-notes.md
