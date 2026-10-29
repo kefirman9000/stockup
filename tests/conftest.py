@@ -40,3 +40,12 @@ def cert(tmp_path):
     if not c:
         pytest.skip("openssl isn't installed, so the encrypted-connection tests can't run")
     return c
+
+
+def pytest_runtest_logreport(report):
+    """On GitHub, show each failing test as a note on the run, so it can be read without logs."""
+    if report.failed and os.environ.get("GITHUB_ACTIONS"):
+        text = str(report.longrepr)[-1800:]
+        msg = text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+        sys.__stdout__.write(f"::error title={report.nodeid}::{msg}\n")
+        sys.__stdout__.flush()
