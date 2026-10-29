@@ -120,11 +120,16 @@ def test_app_updates_itself_keeps_a_backup_and_reopens(stockup, release, frozen_
     app = stockup.App()
     state = run_update(stockup, app)
     assert state["stage"] == "restarting", state
-    wait(lambda: marker.exists())  # swapped, then reopened
-    exe = frozen_app["exe"]
-    assert open(exe).read() == "version 9.9.9"  # the new version is in place
     work = (stockup.CONF_DIR + "/update") if kind == "mac" else os.path.join(
         os.path.dirname(frozen_app["path"]), "StockUp-update")
+    log = os.path.join(work, "update.log")
+    try:
+        wait(lambda: marker.exists())  # swapped, then reopened
+    except AssertionError:
+        raise AssertionError("didn't reopen. Update log:\n" + (open(log).read() if os.path.exists(log)
+                                                             else "(no log: the helper never ran)"))
+    exe = frozen_app["exe"]
+    assert open(exe).read() == "version 9.9.9"  # the new version is in place
     backup = os.path.join(work, "previous", os.path.basename(frozen_app["path"]))
     old_exe = os.path.join(backup, "Contents", "MacOS", "StockUp") if kind == "mac" \
         else os.path.join(backup, "StockUp.exe")
