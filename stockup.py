@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 
@@ -291,6 +291,7 @@ DEFAULT_OPTIONS = {
     "skip_sent": True,               # skip photos already sent to that site before
     "upload_order": "spread",        # "spread": shuffled, look-alikes kept apart; "folder"
     "upload_pacing": "together",     # "together": all sites at once; "one_by_one"
+    "auto_categories": True,         # fill in categories from titles and keywords when empty
 }
 
 
@@ -701,6 +702,192 @@ def editorial_caption(text, city, region, date, style="ss"):
 # --------------------------------------------------------------------------
 
 # --------------------------------------------------------------------------
+# Picking categories from your titles and keywords
+# --------------------------------------------------------------------------
+
+# (words that point to this subject, Shutterstock category, Adobe category,
+#  Dreamstime category, Dreamstime editorial category when the photo is editorial)
+TOPICS = [
+    ("sunset sunrise dusk dawn twilight golden-hour blue-hour afterglow", "Nature", 11, 23, 183),
+    ("sky cloud cloudy storm thunderstorm lightning rainbow overcast", "Nature", 11, 22, 183),
+    ("mountain peak alpine alps hill hillside valley summit ridge volcano", "Nature", 11, 15, 183),
+    ("sea ocean beach coast coastal wave surf shore shoreline bay harbor harbour cliff seaside "
+     "lighthouse", "Nature", 11, 19, 183),
+    ("lake river pond stream creek reflection lagoon", "Nature", 11, 16, 183),
+    ("waterfall cascade rapids", "Nature", 11, 24, 183),
+    ("forest woods woodland jungle rainforest pine oak", "Nature", 11, 18, 183),
+    ("desert dune sand canyon arid", "Nature", 11, 17, 183),
+    ("field meadow grass grassland prairie countryside vineyard wheat pasture rural farmland",
+     "Nature", 11, 27, 183),
+    ("landscape scenic scenery panorama panoramic vista nature outdoor wilderness", "Nature", 11, 146, 183),
+    ("flower flowers bloom blossom garden rose tulip petal bouquet daisy sunflower lavender",
+     "Nature", 14, 25, 183),
+    ("plant leaf leaves fern moss succulent cactus tree foliage branch", "Nature", 14, 12, 183),
+    ("snow winter autumn fall-foliage frost frozen ice icy spring summer seasonal", "Nature", 11, 26, 183),
+    ("tropical palm island paradise exotic", "Nature", 21, 20, 183),
+    ("water drop droplet splash ripple", "Nature", 5, 171, 183),
+    ("night stars star milky-way astronomy moon galaxy astrophotography", "Nature", 11, 130, 183),
+    ("aerial drone birds-eye top-view overhead", "Nature", 11, 211, 183),
+    ("bird birds eagle owl gull seagull duck parrot heron hawk swan pigeon robin", "Animals/Wildlife", 1, 31, 179),
+    ("dog puppy cat kitten pet pets", "Animals/Wildlife", 1, 30, 179),
+    ("cow horse sheep goat pig chicken cattle lamb donkey", "Animals/Wildlife", 1, 33, 179),
+    ("wildlife deer bear fox wolf lion elephant tiger zebra giraffe monkey squirrel rabbit safari",
+     "Animals/Wildlife", 1, 168, 179),
+    ("fish whale dolphin shark coral jellyfish seal octopus underwater", "Animals/Wildlife", 1, 34, 179),
+    ("insect butterfly bee ant dragonfly spider beetle ladybug moth", "Animals/Wildlife", 1, 36, 179),
+    ("snake lizard frog toad crocodile turtle tortoise reptile", "Animals/Wildlife", 1, 35, 179),
+    ("food meal dish dinner lunch breakfast cooking cuisine recipe bread cake dessert pizza pasta "
+     "salad soup meat cheese baking restaurant", "Food and drink", 7, 127, 185),
+    ("fruit vegetable vegetables apple tomato berry berries orange lemon carrot produce banana grape",
+     "Food and drink", 7, 137, 185),
+    ("drink coffee tea wine beer cocktail juice beverage espresso", "Food and drink", 4, 127, 185),
+    ("building skyscraper architecture tower modern facade office-building", "Buildings/Landmarks", 2, 131, 184),
+    ("castle church cathedral temple historic palace monastery medieval old-town chapel mosque",
+     "Buildings/Landmarks", 2, 132, 184),
+    ("ruins ruin ancient archaeology", "Buildings/Landmarks", 2, 174, 184),
+    ("landmark monument bridge statue famous memorial", "Buildings/Landmarks", 21, 70, 184),
+    ("city street urban downtown skyline cityscape town village square alley", "Buildings/Landmarks", 21, 72, 179),
+    ("interior room kitchen living-room bedroom bathroom apartment furniture indoor cozy",
+     "Interiors", 2, 73, 185),
+    ("home house cottage cabin real-estate", "Buildings/Landmarks", 2, 153, 185),
+    ("travel tourism tourist vacation trip destination journey sightseeing", "Parks/Outdoor", 21, 61, 179),
+    ("business office meeting corporate entrepreneur startup teamwork workplace coworker",
+     "Business/Finance", 3, 75, 185),
+    ("money finance bank banking coin cash investment dollar currency economy savings",
+     "Business/Finance", 3, 80, 185),
+    ("computer laptop code coding programming software keyboard", "Technology", 19, 105, 185),
+    ("internet network data cloud-computing online cyber", "Technology", 19, 111, 185),
+    ("smartphone phone mobile tablet electronics gadget device", "Technology", 19, 129, 185),
+    ("artificial-intelligence ai robot robotics automation", "Technology", 19, 210, 185),
+    ("science laboratory lab research microscope chemistry experiment scientist", "Science", 16, 209, 185),
+    ("health medical doctor hospital nurse medicine pill healthcare clinic patient", "Healthcare/Medical",
+     16, 92, 185),
+    ("woman women girl female lady", "People", 13, 116, 180),
+    ("man men boy male guy", "People", 13, 117, 180),
+    ("child children kid kids baby toddler", "People", 13, 119, 180),
+    ("family parents mother father", "People", 13, 118, 180),
+    ("couple romance romantic love", "People", 6, 115, 180),
+    ("senior elderly grandmother grandfather retired", "People", 13, 121, 180),
+    ("teen teenager", "People", 13, 120, 180),
+    ("portrait face people person crowd", "People", 13, 162, 180),
+    ("happy smile smiling joy sad stress anxiety emotion lonely fear excited", "People", 6, 159, 180),
+    ("fashion beauty makeup cosmetic style model dress clothing outfit", "Beauty/Fashion", 12, 175, 185),
+    ("sport sports football soccer basketball tennis baseball golf hockey athlete stadium match",
+     "Sports/Recreation", 18, 157, 182),
+    ("running runner marathon race cycling cyclist swimming gym fitness yoga workout ski skiing "
+     "surfing climbing", "Sports/Recreation", 18, 123, 182),
+    ("hiking hiker camping park picnic kayak canoe trail fishing adventure", "Parks/Outdoor", 9, 123, 179),
+    ("car boat ship sailboat yacht train plane airplane airport bus truck bicycle bike vehicle road "
+     "highway traffic transport transportation ferry", "Transportation", 20, 98, 179),
+    ("industry factory industrial warehouse manufacturing machinery steel", "Industrial", 10, 100, 185),
+    ("construction crane building-site excavator worker", "Industrial", 10, 90, 185),
+    ("energy solar wind-turbine power-plant electricity renewable", "Industrial", 10, 97, 183),
+    ("oil gas refinery pipeline", "Industrial", 10, 161, 185),
+    ("cargo shipping container port freight logistics", "Industrial", 10, 93, 185),
+    ("agriculture farming harvest tractor crop farmer", "Industrial", 10, 101, 185),
+    ("environment pollution climate recycling ecology sustainability conservation", "Nature", 5, 99, 183),
+    ("education school student classroom study learning teacher university book", "Education", 12, 150, 185),
+    ("religion religious prayer faith spiritual buddha worship", "Religion", 15, 128, 179),
+    ("christmas xmas santa", "Holidays", 15, 190, 179),
+    ("halloween pumpkin", "Holidays", 15, 192, 179),
+    ("easter", "Holidays", 15, 193, 179),
+    ("thanksgiving", "Holidays", 15, 191, 179),
+    ("valentine valentines", "Holidays", 6, 194, 179),
+    ("new-year fireworks", "Holidays", 15, 189, 179),
+    ("holiday celebration festival parade carnival fourth-of-july independence-day", "Holidays", 15, 202, 179),
+    ("protest demonstration rally homeless poverty refugee activism", "People", 17, 181, 181),
+    ("abstract", "Abstract", 8, 112, 185),
+    ("background backdrop wallpaper copy-space", "Backgrounds/Textures", 8, 112, 185),
+    ("texture pattern grunge surface", "Backgrounds/Textures", 8, 141, 185),
+    ("bokeh blur blurred defocused", "Backgrounds/Textures", 8, 39, 185),
+    ("art painting sculpture artwork mural graffiti artist gallery museum", "Arts", 15, 124, 185),
+    ("music guitar concert piano musician instrument band", "Arts", 9, 151, 179),
+    ("isolated white-background cutout", "Objects", 8, 135, 185),
+    ("tool tools hammer wrench", "Objects", 10, 140, 185),
+    ("toy toys", "Objects", 9, 134, 185),
+    ("still-life object objects product", "Objects", 12, 144, 185),
+    ("vintage retro antique nostalgic old-fashioned", "Vintage", 12, 152, 185),
+    ("sign symbol icon signage arrow", "Signs/Symbols", 8, 145, 185),
+    ("flag flags", "Signs/Symbols", 15, 68, 179),
+]
+
+_TOPIC_WORDS = []
+for _i, (_words, *_rest) in enumerate(TOPICS):
+    for _w in _words.split():
+        _TOPIC_WORDS.append((_w.replace("-", " "), _i))
+_SINGLE = {}
+_PHRASES = []
+for _w, _i in _TOPIC_WORDS:
+    if " " in _w:
+        _PHRASES.append((_w, _i))
+    else:
+        _SINGLE.setdefault(_w, set()).add(_i)
+
+
+def _forms(tok):
+    yield tok
+    if len(tok) > 3 and tok.endswith("ies"):
+        yield tok[:-3] + "y"
+    if len(tok) > 3 and tok.endswith("es"):
+        yield tok[:-2]
+    if len(tok) > 3 and tok.endswith("s"):
+        yield tok[:-1]
+
+
+def suggest_categories(title, keywords, editorial=False, description=""):
+    """Best guesses for each site's categories, and the words they came from."""
+    scores, why = {}, {}
+
+    def score(text, weight):
+        low = " " + re.sub(r"[^a-z0-9]+", " ", text.lower()).strip() + " "
+        hit = set()
+        for phrase, i in _PHRASES:
+            if f" {phrase} " in low:
+                hit.add((i, phrase))
+        for tok in low.split():
+            for form in _forms(tok):
+                if form in _SINGLE:
+                    for i in _SINGLE[form]:
+                        hit.add((i, form))
+                    break
+        for i, word in hit:
+            scores[i] = scores.get(i, 0) + weight
+            why.setdefault(i, [])
+            if word not in why[i]:
+                why[i].append(word)
+
+    score(title or "", 3)
+    if description and description != title:
+        score(description, 1)
+    for n, k in enumerate(keywords):
+        score(k, 2 if n < 10 else 1)
+    if not scores:
+        return {"ss": [], "adobe": None, "dt": [], "why": []}
+
+    def best(index, limit, share):
+        per = {}
+        for i, sc in scores.items():
+            per.setdefault(TOPICS[i][index], []).append(sc)
+        # the strongest subject counts in full, related ones a little: a photo of a puppy in
+        # autumn leaves is about the puppy, even though several nature words appear
+        tally = {c: max(v) + 0.3 * (sum(v) - max(v)) for c, v in per.items() if c is not None}
+        ranked = sorted(tally.items(), key=lambda kv: -kv[1])
+        top = ranked[0][1] if ranked else 0
+        return [c for c, sc in ranked[:limit] if sc >= max(2, top * share)]
+
+    ss = best(1, 2, 0.5)
+    adobe = (best(2, 1, 0) or [None])[0]
+    dt = best(3, 3, 0.4)
+    if editorial:
+        ed = best(4, 1, 0)
+        if ed and ed[0] not in dt:
+            dt = (ed + dt)[:3]
+    top_topics = sorted(scores, key=lambda i: -scores[i])[:4]
+    words = [w for i in top_topics for w in why[i]][:6]
+    return {"ss": ss, "adobe": adobe, "dt": dt, "why": words}
+
+
+# --------------------------------------------------------------------------
 # Fingerprints: to protect originals and to spot photos you've sent before
 # --------------------------------------------------------------------------
 
@@ -813,8 +1000,11 @@ def spread_order(files, looks, seed):
     return order
 
 
+FINGERPRINTS_NAME = ".stockup_fingerprints.json"
+
+
 class Batch:
-    def __init__(self, folder):
+    def __init__(self, folder, background=False):
         self.folder = os.path.abspath(folder)
         self.out = os.path.join(self.folder, OUT_NAME)
         self.state_path = os.path.join(self.folder, STATE_NAME)
@@ -824,23 +1014,59 @@ class Batch:
             (f for f in os.listdir(self.folder)
              if f.lower().endswith(IMAGE_EXT) and not f.startswith(".")),
             key=str.lower)
-        self.sha, self.look, self.stat = {}, {}, {}
-        for f in self.files:
+        self.sha, self.look, self.stat, self.twins = {}, {}, {}, {}
+        for f in self.files:  # quick: only reads the start of each file
             p = os.path.join(self.folder, f)
             m, thumb = read_photo(p)
             self.meta[f] = m
             if thumb:
                 self.thumbs[f] = thumb
-            self.sha[f] = file_sha256(p)
             self.stat[f] = stat_key(p)
-            self.look[f] = picture_hash(p)
-        by_sha = {}
-        for f in self.files:
-            by_sha.setdefault(self.sha[f], []).append(f)
-        self.twins = {f: [g for g in by_sha[self.sha[f]] if g != f] for f in self.files}
+        self.scan = {"done": 0, "total": len(self.files), "ready": False}
         self.sent = self._load_sent()
         self.history = load_history()
         self.state = self._load_state()
+        if background:
+            threading.Thread(target=self._fingerprint, daemon=True).start()
+        else:
+            self._fingerprint()
+
+    def _fingerprint(self):
+        """Read every photo in full (in the background): a fingerprint to spot duplicates and
+        photos sent before, and a 'looks like' hash. Remembered, so reopening is quick."""
+        cache_path = os.path.join(self.folder, FINGERPRINTS_NAME)
+        try:
+            with open(cache_path, encoding="utf-8") as fh:
+                cache = json.load(fh)
+        except (OSError, ValueError):
+            cache = {}
+        fresh = {}
+        for i, f in enumerate(self.files):
+            p = os.path.join(self.folder, f)
+            c = cache.get(f)
+            if c and c[:2] == self.stat[f] and c[2] and (c[3] or not have_pillow()):
+                sha, look = c[2], c[3]
+            else:
+                try:
+                    sha, look = file_sha256(p), picture_hash(p)
+                except OSError:
+                    sha, look = "", ""
+            self.sha[f], self.look[f] = sha, look
+            fresh[f] = self.stat[f] + [sha, look]
+            self.scan["done"] = i + 1
+        by_sha = {}
+        for f in self.files:
+            if self.sha[f]:
+                by_sha.setdefault(self.sha[f], []).append(f)
+        self.twins = {f: [g for g in by_sha.get(self.sha[f], []) if g != f] for f in self.files}
+        try:
+            tmp = cache_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(fresh, fh)
+            os.replace(tmp, cache_path)
+        except OSError:
+            pass
+        self.scan["ready"] = True
 
     def _load_sent(self):
         try:
@@ -863,7 +1089,7 @@ class Batch:
 
     def sent_before(self, f, site):
         """(how it matched, entry) if this photo went to this site from another batch."""
-        e = self.history["sha"].get(self.sha[f], {}).get(site)
+        e = self.history["sha"].get(self.sha.get(f), {}).get(site)
         if e and not (e["batch"] == self.folder and e["file"] == f):
             return "exact", e
         look = self.look.get(f)
@@ -894,10 +1120,45 @@ class Batch:
             s.setdefault("ed_city", m["city"])
             s.setdefault("ed_region", m["country"] or m["state"])
             s.setdefault("ed_date", m["date"])
+            s.setdefault("auto_cats", [])  # which of ss/adobe/dt StockUp picked (not you)
+            s.setdefault("cat_why", [])
             s.setdefault("fixes", [])   # ["adobe:shorten_title", ...]
             s.setdefault("skip", [])    # sites you chose not to send this photo to
             s.setdefault("force", [])   # sites to send to even though a check says no
-        return {f: st[f] for f in self.files}
+        state = {f: st[f] for f in self.files}
+        if opts["auto_categories"]:
+            for f in self.files:
+                self._autofill(f, state[f], overwrite=False)
+        return state
+
+    def _autofill(self, f, s, overwrite):
+        """Fill categories from the title and keywords. Never replaces a choice you made,
+        unless you asked for it (overwrite=True, from the Auto-pick button)."""
+        m = self.meta[f]
+        sug = suggest_categories(m["title"] or m["description"], m["keywords"], s["editorial"],
+                                 m["description"])
+        n = 0
+        for key, field, val in (("ss", "ss_cats", sug["ss"]), ("adobe", "adobe_cat", sug["adobe"]),
+                                ("dt", "dt_cats", sug["dt"])):
+            empty = not s[field]
+            if val and (overwrite or empty or key in s["auto_cats"]) and s[field] != val:
+                s[field] = val
+                n += 1
+            if val and (overwrite or empty or key in s["auto_cats"]) and key not in s["auto_cats"]:
+                s["auto_cats"].append(key)
+        if n or overwrite:
+            s["cat_why"] = sug["why"]
+        return n
+
+    def autopick(self, files):
+        n = 0
+        with self.lock:
+            for f in (files or self.files):
+                if f in self.state:
+                    self._autofill(f, self.state[f], overwrite=True)
+                    n += 1
+        self.save()
+        return n
 
     def save(self, incoming=None):
         with self.lock:
@@ -905,6 +1166,7 @@ class Batch:
                 if f not in self.state:
                     continue
                 cat = s.get("adobe_cat")
+                old = dict(self.state[f])
                 self.state[f].update({
                     "editorial": bool(s.get("editorial")),
                     "ss_cats": [c for c in s.get("ss_cats", []) if c in SHUTTERSTOCK_CATEGORIES][:2],
@@ -915,6 +1177,14 @@ class Batch:
                     "ed_region": str(s.get("ed_region", "")).strip(),
                     "ed_date": str(s.get("ed_date", "")).strip(),
                 })
+                cur = self.state[f]
+                for key, field in (("ss", "ss_cats"), ("adobe", "adobe_cat"), ("dt", "dt_cats")):
+                    if cur[field] != old.get(field) and key in cur["auto_cats"]:
+                        cur["auto_cats"].remove(key)  # you chose this one yourself
+                if cur["editorial"] != old.get("editorial") and "dt" in cur["auto_cats"]:
+                    m = self.meta[f]  # Dreamstime's editorial categories follow the editorial flag
+                    cur["dt_cats"] = suggest_categories(m["title"] or m["description"], m["keywords"],
+                                                        cur["editorial"], m["description"])["dt"]
             tmp = self.state_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump({"version": VERSION, "files": self.state}, fh, indent=1)
@@ -939,6 +1209,8 @@ class Batch:
             for f in self.files:
                 if self.auto_reason(f, opts) and not self.state[f]["editorial"]:
                     self.state[f]["editorial"] = True
+                    if "dt" in self.state[f]["auto_cats"]:
+                        self._autofill(f, self.state[f], overwrite=False)
                     n += 1
         self.save()
         return n
@@ -1719,10 +1991,25 @@ class FTPConn:
         except ftplib.error_perm:
             return []
 
-    def put(self, local, name, progress):
-        with open(local, "rb") as fh:
-            self.ftp.storbinary("STOR " + name, fh, blocksize=256 * 1024,
-                                callback=lambda b: progress(len(b)))
+    def delete(self, name):
+        self.ftp.delete(name)
+
+    def put(self, local, name, progress, handed_over=None):
+        # Like ftplib's storbinary, plus a signal once every byte has been handed to the
+        # network and StockUp is only waiting for the site to confirm it.
+        self.ftp.voidcmd("TYPE I")
+        with open(local, "rb") as fh, self.ftp.transfercmd("STOR " + name) as conn:
+            while True:
+                buf = fh.read(256 * 1024)
+                if not buf:
+                    break
+                conn.sendall(buf)
+                progress(len(buf))
+            if handed_over:
+                handed_over()
+            if isinstance(conn, ssl.SSLSocket):
+                conn.unwrap()
+        self.ftp.voidresp()
         try:
             remote = self.ftp.size(name)
             if remote is not None and remote != os.path.getsize(local):
@@ -1758,7 +2045,10 @@ class SFTPConn:
     def listdir(self):
         return self.sftp.listdir()
 
-    def put(self, local, name, progress):
+    def delete(self, name):
+        self.sftp.remove(name)
+
+    def put(self, local, name, progress, handed_over=None):
         last = [0]
 
         def cb(done, total):
@@ -1839,22 +2129,50 @@ def send_sheet(batch, site):
                                    f"{' over an encrypted connection' if enc else ''}."}
 
 
+class Interrupted(Exception):
+    """Raised inside a transfer when you press Pause or Stop."""
+
+
+PARTIAL_NAME = ".stockup_partial.json"
+
+
 class Uploader:
     def __init__(self, batch):
         self.batch = batch
         self.log_path = os.path.join(batch.folder, UPLOAD_LOG_NAME)
+        self.partial_path = os.path.join(batch.folder, PARTIAL_NAME)
         self.receipt_path = os.path.join(batch.out, "upload_receipt.csv")
         self.lock = threading.Lock()
         self.progress = {}
         self.running = False
         self.stop_requested = False
+        self.paused = False
 
+    # ---- records ------------------------------------------------------------
     def _load_log(self):
         try:
             with open(self.log_path, encoding="utf-8") as fh:
                 return json.load(fh)
         except (OSError, ValueError):
             return {}
+
+    def _partials(self):
+        """Files StockUp started sending but didn't finish: ours to replace, never someone else's."""
+        try:
+            with open(self.partial_path, encoding="utf-8") as fh:
+                return {k: set(v) for k, v in json.load(fh).items()}
+        except (OSError, ValueError):
+            return {}
+
+    def _set_partial(self, site, name, unfinished):
+        with self.lock:
+            p = self._partials()
+            names = p.setdefault(site, set())
+            (names.add if unfinished else names.discard)(name)
+            tmp = self.partial_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({k: sorted(v) for k, v in p.items() if v}, fh, indent=1)
+            os.replace(tmp, self.partial_path)
 
     def _mark_done(self, site, f, sent_as, local, encrypted):
         with self.lock:
@@ -1879,16 +2197,29 @@ class Uploader:
                             sent_as, os.path.getsize(local), "yes" if same else "no (copy)",
                             "yes" if encrypted else "no",
                             self.batch.sha[f] if same else file_sha256(local)])
+        self._set_partial(site, sent_as, False)
         record_history(site, self.batch.folder, f, self.batch.sha[f], self.batch.look.get(f, ""))
 
+    # ---- controls -----------------------------------------------------------
     def status(self):
         with self.lock:
-            return {"running": self.running, "stopping": self.stop_requested and self.running,
+            return {"running": self.running, "paused": self.paused and self.running,
+                    "stopping": self.stop_requested and self.running,
                     "sites": json.loads(json.dumps(self.progress))}
 
     def stop(self):
         self.stop_requested = True
+        self.paused = False
 
+    def pause(self, on):
+        if self.running:
+            self.paused = bool(on)
+
+    def _check(self):
+        if self.stop_requested or self.paused:
+            raise Interrupted()
+
+    # ---- running ------------------------------------------------------------
     def start(self, only=None):
         if self.running:
             return False
@@ -1899,6 +2230,7 @@ class Uploader:
         if not sites:
             return False
         self.stop_requested = False
+        self.paused = False
         with self.lock:
             self.running = True
             self.progress = {}
@@ -1938,6 +2270,7 @@ class Uploader:
                                            "(StockUp never writes to them, so another app did): "
                                            + ", ".join(changed))
                 self.running = False
+                self.paused = False
         threading.Thread(target=waiter, daemon=True).start()
         return True
 
@@ -1953,6 +2286,34 @@ class Uploader:
         with self.lock:
             self.progress[site]["notes"].append(msg)
 
+    def _remove_partial(self, site, remote_name):
+        """After an interrupted transfer: delete the half-sent file so the site never gets it."""
+        label = SITES[site["name"]]["label"]
+        for attempt in range(2):
+            try:
+                c = connect(site)
+                try:
+                    if remote_name in c.listdir():
+                        c.delete(remote_name)
+                finally:
+                    c.close()
+                self._set_partial(site["name"], remote_name, False)
+                return True
+            except Exception as e:
+                last = e
+                time.sleep(1)
+        self._err(site["name"], f"{remote_name}: StockUp couldn't remove the half-sent file from "
+                                f"{label} ({last}). It will replace it next time you upload; or "
+                                f"delete it on {label}'s site.")
+        return False
+
+    def _wait_while_paused(self, name):
+        if not self.paused:
+            return
+        self._set(name, state="paused", current="")
+        while self.paused and not self.stop_requested:
+            time.sleep(0.3)
+
     def _run_site(self, site):
         name = site["name"]
         opts = load_options()
@@ -1962,34 +2323,45 @@ class Uploader:
             todo = spread_order(todo, self.batch.look,
                                 f"{self.batch.folder}|{name}|{datetime.now():%Y-%m-%d}")
         conn, failures_in_row, last, on_server = None, 0, "", set()
-        sent_now = {self.batch.sha[f] for f in self.batch.sent.get(name, set())}
+        ours = self._partials().get(name, set())  # half-sent earlier by StockUp: safe to replace
+        sent_now = {self.batch.sha.get(f) for f in self.batch.sent.get(name, set())}
+
+        def hang_up():
+            nonlocal conn
+            if conn:
+                conn.close()
+            conn = None
+
         for f in todo:
-            if opts["skip_sent"] and self.batch.sha[f] in sent_now:
+            self._wait_while_paused(name)
+            if self.stop_requested:
+                hang_up()
+                self._set(name, state="stopped", current="")
+                return
+            if opts["skip_sent"] and self.batch.sha.get(f) in sent_now:
                 self._note(name, f"{f} is the same file as one already sent to "
                                  f"{SITES[name]['label']}, so it was skipped.")
                 continue
-            if self.stop_requested:
-                self._set(name, state="stopped", current="")
-                if conn:
-                    conn.close()
-                return
             try:
                 plan = self.batch.plan(f, name)
                 local = self.batch.site_file(f, name, plan)
             except Exception as e:
                 self._err(name, f"{f}: couldn't prepare the file ({e})")
                 continue
-            ok, skipped = False, False
-            for attempt in range(3):
+            remote = plan["name"]
+            ok, skipped, attempt = False, False, 0
+            while attempt < 3:
                 start_bytes = self.progress[name]["bytes"]
+                started = False
                 try:
+                    self._check()
                     if conn is None:
                         self._set(name, state="connecting")
                         conn = connect(site)
                         on_server = set(conn.listdir())
                         self._set(name, encrypted=conn.encrypted)
-                    if plan["name"] in on_server:
-                        self._note(name, f"{plan['name']} is already on the {SITES[name]['label']} "
+                    if remote in on_server and remote not in ours:
+                        self._note(name, f"{remote} is already on the {SITES[name]['label']} "
                                          f"server, so it wasn't sent again or overwritten.")
                         skipped = True
                         break
@@ -1998,16 +2370,36 @@ class Uploader:
                     def prog(n, _name=name):
                         with self.lock:
                             self.progress[_name]["bytes"] += n
-                    conn.put(local, plan["name"], prog)
-                    on_server.add(plan["name"])
-                    sent_now.add(self.batch.sha[f])
+                        self._check()  # Pause / Stop take effect mid-photo
+                    self._set_partial(name, remote, True)
+                    ours.add(remote)
+                    started = True
+                    conn.put(local, remote, prog,
+                             lambda _name=name: self._set(_name, state="finishing"))
+                    on_server.add(remote)
+                    sent_now.add(self.batch.sha.get(f))
                     ok = True
                     break
+                except Interrupted:
+                    self._set(name, bytes=start_bytes)
+                    hang_up()
+                    if started:
+                        self._set(name, state="tidying up", current=f)
+                        if self._remove_partial(site, remote):
+                            ours.discard(remote)
+                            self._note(name, f"{remote}: interrupted part-way; the half-sent file "
+                                             f"was removed from the server.")
+                    if self.stop_requested:
+                        self._set(name, state="stopped", current="")
+                        return
+                    self._wait_while_paused(name)  # then send this photo again from the start
+                    if self.stop_requested:
+                        self._set(name, state="stopped", current="")
+                        return
+                    continue
                 except Exception as e:
                     self._set(name, bytes=start_bytes)
-                    if conn:
-                        conn.close()
-                    conn = None
+                    hang_up()
                     last = str(e) or e.__class__.__name__
                     low = last.lower()
                     if "530" in last or "login" in low or "auth" in low or "paramiko" in low \
@@ -2015,23 +2407,25 @@ class Uploader:
                         self._set(name, state="error", current="")
                         self._err(name, f"Couldn't connect: {last}")
                         return
-                    time.sleep(2 * (attempt + 1))
+                    attempt += 1
+                    time.sleep(2 * attempt)
             if ok:
                 failures_in_row = 0
-                self._mark_done(name, f, plan["name"], local, conn.encrypted if conn else False)
+                self._mark_done(name, f, remote, local, conn.encrypted if conn else False)
+                ours.discard(remote)
                 with self.lock:
                     self.progress[name]["done"] += 1
             elif not skipped:
                 failures_in_row += 1
                 self._err(name, f"{f}: {last}")
+                if remote in self._partials().get(name, set()):  # never leave half a file behind
+                    self._remove_partial(site, remote)
                 if failures_in_row >= 5:
                     self._set(name, state="error", current="")
                     self._err(name, "Stopped after 5 failures in a row.")
-                    if conn:
-                        conn.close()
+                    hang_up()
                     return
-        if conn:
-            conn.close()
+        hang_up()
         errs = self.progress[name]["errors"]
         self._set(name, state="finished" if not errs else "finished with errors", current="")
 
@@ -2202,6 +2596,8 @@ input[type=checkbox],input[type=radio]{width:auto;padding:0;margin:0}
 .seg button{border:none;border-radius:0;padding:4px 9px;font-size:12px}
 .seg button.on{background:var(--accent);color:var(--on-accent)}
 .count{display:inline-block;min-width:18px;padding:0 5px;border-radius:9px;background:var(--warn);color:var(--panel);font-size:11px;font-weight:700;margin-left:4px}
+#scanbar{display:none;margin-top:8px;font-size:12px;color:var(--mute)}
+#scanbar .prog{height:4px;margin-top:4px}
 #banner{display:none;margin-top:8px;padding:7px 10px;border-radius:8px;background:var(--warn-bg);font-size:13px}
 main{padding:14px 16px 130px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
@@ -2224,6 +2620,7 @@ main{padding:14px 16px 130px}
 .chip.warn{color:var(--warn);border-color:var(--warn)}
 .chip.fix{background:var(--warn);border-color:var(--warn);color:var(--panel)}
 .chip.skip{color:var(--mute);text-decoration:line-through;opacity:.75}
+.auto{font-style:normal;font-size:9.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--accent);margin-left:3px}
 .chip.sent{background:var(--ok);border-color:var(--ok);color:var(--panel)}
 .mode{font-size:11px;font-weight:600;padding:2px 8px;border-radius:9px;border:1px solid var(--ok);color:var(--ok);white-space:nowrap;cursor:pointer}
 .mode.adj{border-color:var(--warn);color:var(--warn)}
@@ -2278,6 +2675,7 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
     <button onclick="quitApp()">Quit</button>
   </div>
   <div id="banner"></div>
+  <div id="scanbar"><span id="scantext"></span><div class="prog"><i id="scanfill"></i></div></div>
   <div class="bar">
     <div class="group"><b>Pick</b>
       <button onclick="selAll(true)">All</button><button onclick="selAll(false)">None</button>
@@ -2294,6 +2692,9 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
     </div>
   </div>
   <div class="bar">
+    <div class="group"><b>Categories</b>
+      <button onclick="autoCats()" title="Pick categories for the picked photos from their titles and keywords">Auto-pick</button>
+    </div>
     <div class="group" id="ssGroup"><b>Shutterstock category</b>
       <select id="ss1"></select><select id="ss2"></select>
       <button onclick="applySS()">Set</button>
@@ -2316,8 +2717,8 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
   <span id="msg">Click a photo to pick it. Shift-click to pick a range.</span>
   <div class="sites" id="sites"></div>
   <button onclick="testSites()">Check logins</button>
-  <button onclick="build()">Make site files</button>
-  <button class="primary" onclick="upload()">Upload</button>
+  <button onclick="build()" id="buildBtn">Make site files</button>
+  <button class="primary" onclick="upload()" id="uploadBtn">Upload</button>
 </footer>
 <script>
 const SS=__SS__, AD=__AD__, SITES=__SITES__, FIXES=__FIXES__, DT=__DT__;
@@ -2373,9 +2774,10 @@ function render(){
         t.push(`<span class="tag ${loc&&it.ed_date?'':'warn'}">${esc(loc||'add place')} · ${esc(it.ed_date||'add date')}</span>`);}
     }
     t.push(`<span class="tag">${it.keywords.length} keywords</span>`);
-    if(my().includes('shutterstock'))t.push(it.ss_cats.length?`<span class="tag">SS: ${esc(it.ss_cats.join(' + '))}</span>`:'<span class="tag warn">no Shutterstock category</span>');
-    if(my().includes('adobe')&&it.adobe_cat)t.push(`<span class="tag">Adobe: ${esc(AD[it.adobe_cat])}</span>`);
-    if(my().includes('dreamstime')&&it.dt_cats.length)t.push(`<span class="tag">DT: ${esc(it.dt_cats.map(c=>DTNAME[c]?.split(' › ').pop()).join(', '))}</span>`);
+    const au=k=>it.auto_cats.includes(k)?` <i class="auto" title="Picked automatically from: ${esc(it.cat_why.join(', '))}">auto</i>`:'';
+    if(my().includes('shutterstock'))t.push(it.ss_cats.length?`<span class="tag">SS: ${esc(it.ss_cats.join(' + '))}${au('ss')}</span>`:'<span class="tag warn">no Shutterstock category</span>');
+    if(my().includes('adobe')&&it.adobe_cat)t.push(`<span class="tag">Adobe: ${esc(AD[it.adobe_cat])}${au('adobe')}</span>`);
+    if(my().includes('dreamstime')&&it.dt_cats.length)t.push(`<span class="tag">DT: ${esc(it.dt_cats.map(c=>DTNAME[c]?.split(' › ').pop()).join(', '))}${au('dt')}</span>`);
     if(it.info.gps)t.push(`<span class="tag ${opts.strip_gps?'':'warn'}" title="Where the photo was taken is saved in the file">${opts.strip_gps?'GPS removed on upload':'has GPS location'}</span>`);
     const mp=(it.info.width*it.info.height/1e6).toFixed(1);
     return `<div class="card ${sel.has(it.file)?'sel':''} ${it.editorial?'ed':''}" data-f="${esc(it.file)}" title="${esc(it.auto?'Marked editorial automatically: '+it.auto:'')}">
@@ -2412,6 +2814,12 @@ function setEd(v){if(need())each(it=>it.editorial=v)}
 function applySS(){if(!need())return;const c=[$('ss1').value,$('ss2').value].filter(Boolean);
   if(!c.length)return note('Choose a Shutterstock category first.');each(it=>it.ss_cats=[...new Set(c)])}
 function applyAd(){if(!need())return;const v=$('ad').value;if(!v)return note('Choose an Adobe category first.');each(it=>it.adobe_cat=+v)}
+async function autoCats(){
+  if(!sel.size)return note('Pick the photos to auto-pick categories for (click “All” for the whole batch).');
+  if(!confirm(`Pick categories for ${sel.size} photo${sel.size>1?'s':''} from their titles and keywords? This replaces the categories they have now.`))return;
+  try{await save();const r=await api('/api/autocats',{files:[...sel]});await load();note(`Categories picked for ${r.changed} photo${r.changed==1?'':'s'}. Check them, then change any with the menus.`)}
+  catch(e){note(e.message)}
+}
 function applyDT(){if(!need())return;const c=[$('dt1').value,$('dt2').value,$('dt3').value].filter(Boolean).map(Number);
   if(!c.length)return note('Choose a Dreamstime category first.');each(it=>it.dt_cats=[...new Set(c)])}
 function applyLoc(){if(!need())return;const c=$('ecity').value.trim(),r=$('eregion').value.trim(),d=$('edate').value;
@@ -2529,6 +2937,8 @@ function openSettings(){
   <label class="row"><span style="min-width:150px">Sites</span>
     <select id="o_pace"><option value="together" ${o.upload_pacing=='together'?'selected':''}>All at once</option>
     <option value="one_by_one" ${o.upload_pacing=='one_by_one'?'selected':''}>One site at a time</option></select></label>
+  <label class="row"><input type="checkbox" id="o_cats" ${o.auto_categories?'checked':''}>
+    <span>Pick categories automatically from titles and keywords for photos that don’t have any. Categories you choose yourself are never changed.</span></label>
   <div class="hint" style="margin-top:12px">Sites I sell on</div>
   <div style="display:flex;flex-wrap:wrap;gap:10px;margin:6px 0">${Object.keys(SITES).map(s=>`<label class="row" style="margin:0"><input type="checkbox" class="mysite" value="${s}" ${my().includes(s)?'checked':''}><span>${esc(lab(s))}</span></label>`).join('')}</div>
   <div class="hint" style="margin-top:12px">Titles and captions</div>
@@ -2556,7 +2966,7 @@ async function saveSettings(){
   if($('o_rmode').value!='off'&&!(parseFloat(rv)>0))return note('Type a size for “Resize for upload”, or choose “Don’t resize”.');
   const o={photo_mode:document.querySelector('input[name=pm]:checked').value,resize_mode:$('o_rmode').value,resize_value:rv,
     strip_gps:$('o_gps').checked,skip_sent:$('o_skip').checked,encrypted_only:$('o_enc').checked,
-    upload_order:$('o_order').value,upload_pacing:$('o_pace').value,caption_mode:document.querySelector('input[name=cm]:checked').value,adobe_strip_commas:$('o_commas').checked,
+    upload_order:$('o_order').value,upload_pacing:$('o_pace').value,auto_categories:$('o_cats').checked,caption_mode:document.querySelector('input[name=cm]:checked').value,adobe_strip_commas:$('o_commas').checked,
     flag_formatted:$('o_fmt').checked,editorial_keyword:$('o_kw').value,drop_marker_keyword:$('o_drop').checked,editorial_label:$('o_lab').value,
     my_sites:[...document.querySelectorAll('.mysite:checked')].map(i=>i.value)};
   try{const r=await api('/api/options',o);await load();await loadSites();
@@ -2662,18 +3072,26 @@ async function status(){
       const pct=p.total_bytes?Math.min(100,100*p.bytes/p.total_bytes):0;
       const fin=/finished|stopped|error/.test(p.state);
       const cls=p.state=='error'||p.errors.length?'bad':(fin?'done':'');
-      const word={waiting:'Waiting its turn',connecting:'Connecting…',uploading:'Uploading',finished:'Done','finished with errors':'Done, with problems',stopped:'Stopped',error:'Stopped by a problem'}[p.state]||p.state;
+      let word={waiting:'Waiting its turn',connecting:'Connecting…',uploading:'Uploading',paused:'Paused',finishing:'Finishing this photo…',
+        'tidying up':'Removing the half-sent file…',finished:'Done','finished with errors':'Done, with problems',stopped:'Stopped',error:'Stopped by a problem'}[p.state]||p.state;
+      if(s.paused&&p.state=='finishing')word='Finishing this photo, then pausing';
+      else if(s.paused&&/uploading|connecting/.test(p.state))word='Pausing…';
+      if(s.stopping&&p.state=='finishing')word='Finishing this photo, then stopping';
       return `<div class="pcard ${cls}"><div class="row1"><b>${esc(lab(n))}</b><span>${Math.round(pct)}%</span></div>
         <div class="prog big"><i style="width:${pct}%"></i></div>
         <div class="row1 hint"><span>${esc(word)} · ${p.done} of ${p.total}</span>${p.encrypted===null?'':`<span class="lock ${p.encrypted?'':'no'}">${p.encrypted?'encrypted':'not encrypted'}</span>`}</div>
         ${p.current&&!fin?`<div class="hint">${esc(p.current)}</div>`:''}${p.errors.length?`<div class="err">${p.errors.length} problem${p.errors.length>1?'s':''}</div>`:''}</div>`}).join('')+
-      `<div class="dockbar">${s.running?`<button class="small" ${s.stopping?'disabled':''} onclick="stopUpload()">${s.stopping?'Stopping after this photo…':'Stop'}</button>`:''}
+      `<div class="dockbar">${s.running&&!s.stopping?`<button class="small ${s.paused?'primary':''}" onclick="pauseUpload(${!s.paused})">${s.paused?'Resume':'Pause'}</button>`:''}
+        ${s.running?`<button class="small" ${s.stopping?'disabled':''} onclick="stopUpload()">${s.stopping?'Stopping…':'Stop'}</button>`:''}
         <button class="small" onclick="uploadDetails()">Details</button>${s.running?'':'<button class="small" onclick="hideDock()">Close</button>'}</div>`;
   }
   if(!s.running){clearInterval(poll);if(Object.keys(s.sites).length){note('Upload finished.');load()}}
 }
 function hideDock(){dockHidden=true;$('dock').style.display='none'}
-async function stopUpload(){try{await api('/api/stop',{});status()}catch(e){note(e.message)}}
+async function stopUpload(){
+  if(!confirm('Stop uploading now? Any photo part-way through is removed from the site, and Upload picks up from there next time.'))return;
+  try{await api('/api/stop',{});status()}catch(e){note(e.message)}}
+async function pauseUpload(on){try{await api('/api/pause',{paused:on});note(on?'Paused. Press Resume to carry on; a photo that was part-way through is sent again from the start.':'Resumed.');status()}catch(e){note(e.message)}}
 function uploadDetails(){
   const s=lastStatus;if(!s)return;
   panel('<h3>'+(s.running?'Uploading…':'Upload finished')+'</h3>'+Object.entries(s.sites).map(([n,p])=>`<div class="site"><b>${esc(lab(n))}</b> — ${p.done} of ${p.total} photos · ${mb(p.bytes)} of ${mb(p.total_bytes)}
@@ -2716,10 +3134,26 @@ async function quitApp(force){
   catch(e){document.body.innerHTML='<div class="empty">StockUp has quit. You can close this tab.</div>'}
 }
 
+let scanT=null;
+function showScan(sc){
+  const busy=!sc.ready;
+  $('scanbar').style.display=busy?'block':'none';
+  $('buildBtn').disabled=busy;$('uploadBtn').disabled=busy;
+  $('buildBtn').title=$('uploadBtn').title=busy?'Available once StockUp has finished checking your photos':'';
+  if(busy){$('scantext').textContent=`Checking your photos for duplicates and photos you’ve sent before… ${sc.done} of ${sc.total}. You can start picking and tagging now.`;
+    $('scanfill').style.width=(sc.total?100*sc.done/sc.total:0)+'%';}
+}
+async function watchScan(){
+  clearTimeout(scanT);
+  let sc;try{sc=await api('/api/scan')}catch(e){scanT=setTimeout(watchScan,1500);return}
+  showScan(sc);
+  if(sc.ready){await save();await load();note('Photos checked · '+counts())}else scanT=setTimeout(watchScan,700);
+}
 async function load(){
   const r=await api('/api/items');items=r.items;opts=r.options;VERSION=r.version;FROZEN=r.frozen;PILLOW=r.pillow;
   $('folder').textContent=r.folder.split(/[\\/]/).filter(Boolean).pop()+' · '+items.length+' photos';$('folder').title=r.folder;
-  render();
+  render();showScan(r.scan);
+  if(!r.scan.ready&&!scanT)watchScan();
 }
 window.addEventListener('beforeunload',()=>{if(dirty)save()});
 setInterval(()=>fetch('/api/ping').catch(()=>{}),20000);
@@ -2813,8 +3247,11 @@ def make_handler(app):
                         .replace("__FIXES__", json.dumps(FIXES)) \
                         .replace("__DT__", json.dumps(DREAMSTIME_CATEGORIES))
                     return self._send(200, page, "text/html; charset=utf-8")
+                if p == "/api/scan":
+                    return self._send(200, batch.scan)
                 if p == "/api/items":
                     return self._send(200, {"folder": batch.folder, "items": batch.items(),
+                                            "scan": batch.scan,
                                             "options": load_options(), "version": VERSION,
                                             "frozen": FROZEN, "pillow": have_pillow()})
                 if p == "/api/sites":
@@ -2850,9 +3287,18 @@ def make_handler(app):
             p = urlparse(self.path).path
             try:
                 body = self._json()
+                if p in ("/api/build", "/api/preview", "/api/upload") and not batch.scan["ready"]:
+                    return self._send(200, {"error": f"StockUp is still checking your photos "
+                                                     f"({batch.scan['done']} of {batch.scan['total']}). "
+                                                     f"Try again in a moment."})
+                if p == "/api/pause":
+                    app.uploader.pause(body.get("paused"))
+                    return self._send(200, {"ok": True})
                 if p == "/api/save":
                     batch.save(body)
                     return self._send(200, {"ok": True})
+                if p == "/api/autocats":
+                    return self._send(200, {"changed": batch.autopick(body.get("files") or [])})
                 if p == "/api/fix":
                     n = batch.act(body.get("files") or [], body.get("site", "*"),
                                   body.get("code", "*"), body.get("action", "apply"))
@@ -2862,6 +3308,11 @@ def make_handler(app):
                     opts = save_options(body)
                     rules = ("editorial_keyword", "editorial_label", "flag_formatted")
                     n = batch.reapply_auto() if any(before[k] != opts[k] for k in rules) else 0
+                    if opts["auto_categories"] and not before["auto_categories"]:
+                        with batch.lock:
+                            for f in batch.files:
+                                batch._autofill(f, batch.state[f], overwrite=False)
+                        batch.save()
                     return self._send(200, {"options": opts, "newly_flagged": n})
                 if p == "/api/logins":
                     return self._send(200, save_logins(body))
@@ -3015,7 +3466,7 @@ def main(argv):
         return 1
     load_sites()
     print("Reading your photos…", end=" ", flush=True)
-    batch = Batch(folder)
+    batch = Batch(folder, background=cmd not in ("build", "upload"))
     print(f"{len(batch.files)} JPEGs found.")
     if cmd == "build":
         r = build_outputs(batch)

@@ -32,9 +32,12 @@ StockUp asks which folder holds your batch, then opens in your web browser. Noth
 - **Fixes text problems in a click.** It shortens titles and descriptions that are too long, showing the suggestion first, and gives files a safe name where a site would mangle accents or symbols. Only the spreadsheets or the uploaded file's name change; the photo itself doesn't.
 - **Optional adjusted copies,** off by default. If you allow them in Settings, StockUp can make **sRGB** copies, smaller files, standard (baseline) JPEGs for Alamy, and **resize for upload** to a longest side or megapixel size you choose. It never makes photos bigger, and never goes below a site's minimum. Copies are made only for the sites that need them; your originals stay as they are.
 - **Skips photos a site won't take,** like ones under its minimum size, so they don't fail review. **Send anyway** overrides this.
+- **Picks categories for you** from each photo's title and keywords, for Shutterstock, Adobe and Dreamstime. Picked categories are tagged "auto". **Auto-pick** redoes them for the photos you select, and any category you choose yourself is never changed.
 - **Marks editorial in bulk.** Shift-click a range and click **Editorial**. Photos are also marked for you if the caption already starts with a place and date, or if they have a keyword or Lightroom color label you choose.
 - **Keeps your captions as written** when they already start with a place and date. For the rest, StockUp adds the place and date in each site's format.
-- **Uploads to the sites you tick,** all at once or one site at a time, with a progress bar for each site. If the connection drops, press **Upload** again and it carries on.
+- **Uploads to the sites you tick,** all at once or one site at a time, with a progress bar for each site.
+- **Pause, Resume and Stop at any moment,** even partway through a photo. A half-sent photo is removed from the site's server and sent again from the start, so a site never receives a broken file. If the connection drops, StockUp retries; press **Upload** again later and it carries on where it left off.
+- **Opens big batches instantly.** You can start tagging straight away while StockUp checks the photos in the background. Reopening a batch is instant because it remembers what it already checked.
 - **Shuffles the upload order** and keeps look-alike photos apart, so reviewers don't see a run of near-identical frames. Each site gets its own order.
 - **Fills in Dreamstime too:** titles, keywords, up to three categories, and the editorial flag, sent to Dreamstime with one button.
 - **Keeps your passwords in your computer's keychain:** Keychain on Mac, Credential Manager on Windows.
@@ -47,6 +50,10 @@ StockUp asks which folder holds your batch, then opens in your web browser. Noth
 | Before anything is sent | Uploading, site by site |
 |---|---|
 | ![Upload preview](screenshots/preview-dark.png) | ![Uploading](screenshots/upload-dark.png) |
+
+| Paused |
+|---|
+| ![Paused](screenshots/paused-dark.png) |
 
 | Settings | Logins |
 |---|---|
@@ -61,7 +68,8 @@ StockUp asks which folder holds your batch, then opens in your web browser. Noth
 
 - **Exact files by default.** Every site gets your original files, byte for byte. Fixes that would change the picture stay switched off unless you choose **Let StockUp make adjusted copies** in Settings. The badge at the top of the page always shows which mode you're in.
 - **Your originals are never written to.** Anything StockUp makes is a separate copy in `stockup_output`. Copies are real copies, never links back to your originals. StockUp also fingerprints every original when it opens a batch and checks them again after making files and after uploading. If another app changed one in the meantime, StockUp tells you.
-- **You see everything before it's sent.** **Upload** first shows, for each site: how many photos, which are editorial or copies, what's being left out, and how it will connect. Nothing leaves your computer until you press **Start upload**, and **Stop** halts it after the current photo.
+- **You see everything before it's sent.** **Upload** first shows, for each site: how many photos, which are editorial or copies, what's being left out, and how it will connect. Nothing leaves your computer until you press **Start upload**.
+- **Never half a photo.** Pause and Stop work mid-photo, and StockUp removes the part-sent file from the site. If a connection drops partway, StockUp replaces its own half-sent copy when it retries. If a photo has already been fully sent and StockUp is only waiting for the site to confirm it, it finishes that photo first rather than throwing it away; the progress card says so.
 - **Nothing on a site's server is overwritten.** If a file with the same name is already waiting there, StockUp leaves it alone.
 - **No double uploads.** StockUp remembers what it has sent to each site, across all your batches, and recognises a photo even if it's renamed. A photo already sent is skipped, and one that only *looks* the same is flagged for you to check.
 - **Encrypted when possible.** StockUp always tries an encrypted connection first. It only uses plain FTP for a site that doesn't offer encryption, and you can turn that off in Settings. Each site's progress bar shows whether its connection is encrypted.
@@ -74,7 +82,7 @@ StockUp asks which folder holds your batch, then opens in your web browser. Noth
 
 1. Open StockUp and choose the batch folder.
 2. The first time, open **Settings** and tick the sites you sell on. Then open **Logins** and add each one.
-3. Pick photos and click **Editorial** or **Creative**. Set categories, plus the place and date for editorial shots.
+3. Pick photos and click **Editorial** or **Creative**. Check the categories StockUp picked (change any you like), and add the place and date for editorial shots.
 4. Open **Check photos** and apply the fixes you want.
 5. Click **Make site files**, tick the sites next to **Send to**, and click **Upload**.
 6. Finish on each website. **Make site files** shows the next step for every site:
