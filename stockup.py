@@ -18,13 +18,16 @@ Works with just the Python standard library. Optional extras:
 """
 
 import configparser
+import hashlib
 import csv
 import ftplib
 import json
 import math
+import random
 import os
 import re
 import shutil
+import ssl
 import struct
 import sys
 import threading
@@ -37,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 
@@ -61,6 +64,7 @@ OPTIONS_PATH = os.path.join(CONF_DIR, "stockup_options.json")
 STATE_NAME = "stockup.json"
 OUT_NAME = "stockup_output"
 UPLOAD_LOG_NAME = ".stockup_uploaded.json"
+HISTORY_PATH = os.path.join(CONF_DIR, "upload_history.json")
 IMAGE_EXT = (".jpg", ".jpeg")
 KEYRING_SERVICE = "StockUp"
 
@@ -96,8 +100,10 @@ SITES = {
         "login_hint": "Your Dreamstime user ID (the number shown on Dreamstime's FTP page), "
                       "and your Dreamstime account password.",
         "min_px": 3_000_000, "min_label": "3 MP", "max_mb": 1024, "min_quality": 90,
-        "csv_note": "Dreamstime reads your titles and keywords from the photos. "
-                    "Tick editorial for the files in editorial_list.txt.",
+        "sheet": "dreamstime.csv",
+        "csv_note": "After the photos show up in Dreamstime's Unfinished section, click "
+                    "\u201cSend spreadsheet\u201d here (or upload dreamstime.csv to Dreamstime's FTP "
+                    "yourself). It fills in titles, keywords, categories and the editorial flag.",
     },
     "alamy": {
         "label": "Alamy", "short": "AL",
@@ -164,6 +170,95 @@ ADOBE_CATEGORIES = {
     18: "Sports", 19: "Technology", 20: "Transport", 21: "Travel",
 }
 
+# Dreamstime categories and codes, from Dreamstime's Image_spreadsheet_template.xls
+DREAMSTIME_CATEGORIES = [
+    ("Abstract -> Aerial", 211), ("Abstract -> Backgrounds", 112), ("Abstract -> Blurs", 39),
+    ("Abstract -> Colors", 164), ("Abstract -> Competition", 40),
+    ("Abstract -> Craftsmanship", 41), ("Abstract -> Danger", 42),
+    ("Abstract -> Exploration", 43), ("Abstract -> Fun", 158), ("Abstract -> Help", 44),
+    ("Abstract -> Love", 149), ("Abstract -> Luxury", 45), ("Abstract -> Mobile", 187),
+    ("Abstract -> Peace", 46), ("Abstract -> Planetarium", 165), ("Abstract -> Power", 47),
+    ("Abstract -> Purity", 48), ("Abstract -> Religion", 128),
+    ("Abstract -> Seasonal & Holiday", 155), ("Abstract -> Security", 49),
+    ("Abstract -> Sports", 50), ("Abstract -> Stress", 51), ("Abstract -> Success", 52),
+    ("Abstract -> Teamwork", 53), ("Abstract -> Textures", 141), ("Abstract -> Unique", 54),
+    ("Animals -> Birds", 31), ("Animals -> Farm", 33), ("Animals -> Insects", 36),
+    ("Animals -> Mammals", 32), ("Animals -> Marine life", 34), ("Animals -> Pets", 30),
+    ("Animals -> Reptiles & Amphibians", 35), ("Animals -> Rodents", 37),
+    ("Animals -> Wildlife", 168), ("Arts & Architecture -> Details", 124),
+    ("Arts & Architecture -> Generic architecture", 71),
+    ("Arts & Architecture -> Historic buildings", 132), ("Arts & Architecture -> Home", 153),
+    ("Arts & Architecture -> Indoor", 73), ("Arts & Architecture -> Landmarks", 70),
+    ("Arts & Architecture -> Modern buildings", 131),
+    ("Arts & Architecture -> Night scenes", 130), ("Arts & Architecture -> Outdoor", 72),
+    ("Arts & Architecture -> Ruins & Ancient", 174),
+    ("Arts & Architecture -> Work places", 154), ("Business -> Communications", 79),
+    ("Business -> Computers", 78), ("Business -> Finance", 80), ("Business -> Industries", 77),
+    ("Business -> Metaphors", 83), ("Business -> Objects", 84), ("Business -> People", 75),
+    ("Business -> Still-life", 81), ("Business -> Teams", 76),
+    ("Business -> Transportation", 82), ("Business -> Travel", 85),
+    ("Editorial -> Celebrities", 178), ("Editorial -> Commercial", 185),
+    ("Editorial -> Events", 179), ("Editorial -> Landmarks", 184),
+    ("Editorial -> People", 180), ("Editorial -> Politics", 181), ("Editorial -> Sports", 182),
+    ("Editorial -> Weather & Environment", 183), ("Holidays -> Chinese New Year", 204),
+    ("Holidays -> Christmas", 190), ("Holidays -> Cinco de Mayo", 207),
+    ("Holidays -> Diwali", 203), ("Holidays -> Easter", 193), ("Holidays -> Fathers Day", 196),
+    ("Holidays -> Halloween", 192), ("Holidays -> Hanukkah", 208),
+    ("Holidays -> Mardi Gras", 206), ("Holidays -> Mothers Day", 195),
+    ("Holidays -> New Years", 189), ("Holidays -> Other", 202), ("Holidays -> Ramadan", 205),
+    ("Holidays -> Thanksgiving", 191), ("Holidays -> Valentines Day", 194),
+    ("IT & C -> Artificial Intelligence", 210), ("IT & C -> Connectivity", 110),
+    ("IT & C -> Equipment", 113), ("IT & C -> Internet", 111), ("IT & C -> Networking", 109),
+    ("Illustrations & Clipart -> AI generated", 212),
+    ("Illustrations & Clipart -> 3D & Computer generated", 166),
+    ("Illustrations & Clipart -> Hand drawn & Artistic", 167),
+    ("Illustrations & Clipart -> Illustrations", 163),
+    ("Illustrations & Clipart -> Vector", 186), ("Industries -> Agriculture", 101),
+    ("Industries -> Architecture", 89), ("Industries -> Banking", 87),
+    ("Industries -> Cargo & Shipping", 93), ("Industries -> Communications", 94),
+    ("Industries -> Computers", 91), ("Industries -> Construction", 90),
+    ("Industries -> Education", 150), ("Industries -> Entertainment", 136),
+    ("Industries -> Environment", 99), ("Industries -> Food & Beverages", 127),
+    ("Industries -> Healthcare & Medical", 92), ("Industries -> Insurance", 96),
+    ("Industries -> Legal", 95), ("Industries -> Manufacturing", 100),
+    ("Industries -> Military", 102), ("Industries -> Oil and gas", 161),
+    ("Industries -> Power and energy", 97), ("Industries -> Sports", 157),
+    ("Industries -> Transportation", 98), ("Industries -> Travel", 88),
+    ("Nature -> Clouds and skies", 22), ("Nature -> Deserts", 17), ("Nature -> Details", 14),
+    ("Nature -> Fields & Meadows", 27), ("Nature -> Flowers & Gardens", 25),
+    ("Nature -> Food ingredients", 28), ("Nature -> Forests", 18),
+    ("Nature -> Fruits & Vegetables", 137), ("Nature -> Generic vegetation", 11),
+    ("Nature -> Geologic and mineral", 143), ("Nature -> Lakes and rivers", 16),
+    ("Nature -> Landscapes", 146), ("Nature -> Mountains", 15),
+    ("Nature -> Plants and trees", 12), ("Nature -> Sea & Ocean", 19),
+    ("Nature -> Seasons specific", 26), ("Nature -> Sunsets & Sunrises", 23),
+    ("Nature -> Tropical", 20), ("Nature -> Water", 171), ("Nature -> Waterfalls", 24),
+    ("Objects -> Clothing & Accessories", 142), ("Objects -> Electronics", 147),
+    ("Objects -> Home related", 138), ("Objects -> Isolated", 135),
+    ("Objects -> Music and sound", 151), ("Objects -> Other", 145), ("Objects -> Retro", 152),
+    ("Objects -> Sports", 156), ("Objects -> Still life", 144), ("Objects -> Tools", 140),
+    ("Objects -> Toys", 134), ("People -> Active", 123), ("People -> Body parts", 139),
+    ("People -> Children", 119), ("People -> Cosmetic & Makeup", 175),
+    ("People -> Couples", 115), ("People -> Diversity", 122), ("People -> Expressions", 159),
+    ("People -> Families", 118), ("People -> Men", 117), ("People -> Nudes", 173),
+    ("People -> Portraits", 162), ("People -> Seniors", 121), ("People -> Teens", 120),
+    ("People -> Women", 116), ("People -> Workers", 160), ("Technology -> Computers", 105),
+    ("Technology -> Connections", 106), ("Technology -> Electronics", 129),
+    ("Technology -> Other", 148), ("Technology -> Retro", 107), ("Technology -> Science", 209),
+    ("Technology -> Telecommunications", 104), ("Travel -> Africa", 56),
+    ("Travel -> America", 58), ("Travel -> Antarctica", 176),
+    ("Travel -> Arts & Architecture", 65), ("Travel -> Asia", 57),
+    ("Travel -> Australasian", 60), ("Travel -> Cruise", 62), ("Travel -> Cuisine", 63),
+    ("Travel -> Currencies", 67), ("Travel -> Destination scenics", 61),
+    ("Travel -> Europe", 59), ("Travel -> Flags", 68), ("Travel -> Resorts", 64),
+    ("Travel -> Tropical", 66), ("Web Design Graphics -> Banners", 201),
+    ("Web Design Graphics -> Buttons", 200),
+    ("Web Design Graphics -> Web Backgrounds & Textures", 199),
+    ("Web Design Graphics -> Web Icons", 198),
+]
+DREAMSTIME_CODES = {c for _, c in DREAMSTIME_CATEGORIES}
+
+
 # Fixes StockUp can make, with the button label shown to you
 FIXES = {
     "shorten_title": "Shorten the title",
@@ -185,6 +280,17 @@ DEFAULT_OPTIONS = {
     "adobe_strip_commas": True,
     "upload_sites": [],
     "my_sites": DEFAULT_MY_SITES,
+    # Safety. "untouched": every site gets your exact original file (byte for byte).
+    # "adjusted": StockUp may make new copies for upload (fixes, resizing). Originals
+    # are never changed either way.
+    "photo_mode": "untouched",
+    "resize_mode": "off",            # "off", "long_side" (pixels) or "megapixels"
+    "resize_value": "",
+    "strip_gps": False,              # leave the GPS location out of what's uploaded
+    "encrypted_only": False,         # refuse sites that can't do an encrypted connection
+    "skip_sent": True,               # skip photos already sent to that site before
+    "upload_order": "spread",        # "spread": shuffled, look-alikes kept apart; "folder"
+    "upload_pacing": "together",     # "together": all sites at once; "one_by_one"
 }
 
 
@@ -215,6 +321,14 @@ def save_options(new):
         opts[k] = v
     if opts["caption_mode"] not in ("auto", "keep"):
         opts["caption_mode"] = "auto"
+    if opts["photo_mode"] not in ("untouched", "adjusted"):
+        opts["photo_mode"] = "untouched"
+    if opts["resize_mode"] not in ("off", "long_side", "megapixels"):
+        opts["resize_mode"] = "off"
+    if opts["upload_order"] not in ("spread", "folder"):
+        opts["upload_order"] = "spread"
+    if opts["upload_pacing"] not in ("together", "one_by_one"):
+        opts["upload_pacing"] = "together"
     opts["my_sites"] = [s for s in SITE_ORDER if s in opts["my_sites"]] or list(DEFAULT_MY_SITES)
     with open(OPTIONS_PATH, "w", encoding="utf-8") as fh:
         json.dump(opts, fh, indent=1)
@@ -357,12 +471,12 @@ def parse_iptc(payload):
 
 
 def parse_exif(payload):
-    """(DateTimeOriginal as YYYY-MM-DD or '', embedded thumbnail bytes or None)"""
+    """(DateTimeOriginal as YYYY-MM-DD or '', embedded thumbnail or None, has GPS location)"""
     if not payload.startswith(b"Exif\x00\x00"):
-        return "", None
+        return "", None, False
     t = payload[6:]
     if len(t) < 8:
-        return "", None
+        return "", None, False
     end = "<" if t[:2] == b"II" else ">"
 
     def u16(o):
@@ -384,6 +498,10 @@ def parse_exif(payload):
 
     try:
         ifd0, ifd1_off = ifd(u32(4))
+        gps = False
+        if 0x8825 in ifd0:
+            g, _ = ifd(u32(ifd0[0x8825][2]))
+            gps = 2 in g or 4 in g  # latitude or longitude present
         date = ""
         if 0x8769 in ifd0:
             sub, _ = ifd(u32(ifd0[0x8769][2]))
@@ -400,9 +518,9 @@ def parse_exif(payload):
                 o, ln = u32(ifd1[0x0201][2]), u32(ifd1[0x0202][2])
                 if t[o:o + 2] == b"\xff\xd8":
                     thumb = t[o:o + ln]
-        return date, thumb
+        return date, thumb, gps
     except Exception:
-        return "", None
+        return "", None, False
 
 
 def icc_info(icc):
@@ -479,14 +597,17 @@ def jpeg_quality(dqt):
 
 def read_photo(path):
     xmp, iptc, exif_date, thumb = {}, {}, "", None
-    info = {"width": 0, "height": 0, "components": 3, "progressive": False}
+    info = {"width": 0, "height": 0, "components": 3, "progressive": False, "gps": False}
     icc = b""
     try:
         for marker, payload in jpeg_segments(path):
             if marker == 0xE1 and payload.startswith(b"http://ns.adobe.com/xap/1.0/"):
                 xmp = parse_xmp(payload)
+                if b"GPSLatitude" in payload or b"GPSLongitude" in payload:
+                    info["gps"] = True
             elif marker == 0xE1 and payload.startswith(b"Exif"):
-                exif_date, thumb = parse_exif(payload)
+                exif_date, thumb, gps = parse_exif(payload)
+                info["gps"] = info["gps"] or gps
             elif marker == 0xED:
                 iptc = parse_iptc(payload)
             elif marker == 0xDB and "quality" not in info:
@@ -579,6 +700,119 @@ def editorial_caption(text, city, region, date, style="ss"):
 # A batch: photos, your choices, and the per-site plan
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Fingerprints: to protect originals and to spot photos you've sent before
+# --------------------------------------------------------------------------
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def stat_key(path):
+    st = os.stat(path)
+    return [st.st_size, st.st_mtime_ns]
+
+
+def picture_hash(path):
+    """A 64-bit 'what it looks like' hash, so a re-export still matches (needs Pillow)."""
+    try:
+        from PIL import Image
+        im = Image.open(path)
+        im.draft("L", (128, 128))
+        im = im.convert("L").resize((9, 8), Image.BILINEAR)
+        px = list(im.getdata())
+        bits = 0
+        for r in range(8):
+            for c in range(8):
+                bits = (bits << 1) | (px[r * 9 + c] > px[r * 9 + c + 1])
+        return "%016x" % bits
+    except Exception:
+        return ""
+
+
+_history_lock = threading.Lock()
+
+
+def load_history():
+    try:
+        with open(HISTORY_PATH, encoding="utf-8") as fh:
+            h = json.load(fh)
+        h.setdefault("sha", {})
+        h.setdefault("looks", [])
+        return h
+    except (OSError, ValueError):
+        return {"sha": {}, "looks": []}
+
+
+def record_history(site, folder, f, sha, look):
+    with _history_lock:
+        h = load_history()
+        entry = {"date": datetime.now().strftime("%Y-%m-%d"), "batch": folder, "file": f}
+        h["sha"].setdefault(sha, {})[site] = entry
+        if look:
+            h["looks"].append([look, site, entry["date"], folder, f])
+        tmp = HISTORY_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(h, fh)
+        os.replace(tmp, HISTORY_PATH)
+
+
+def _bits_apart(a, b):
+    return bin(int(a, 16) ^ int(b, 16)).count("1")
+
+
+def _name_number(f):
+    m = re.search(r"(\d+)(?!.*\d)", os.path.splitext(f)[0])
+    return int(m.group(1)) if m else None
+
+
+def spread_order(files, looks, seed):
+    """Shuffle, keeping photos that look alike (or were shot one after another) apart,
+    so a site's reviewers don't see a run of near-identical frames."""
+    rnd = random.Random(seed)
+    parent = {f: f for f in files}
+
+    def find(f):
+        while parent[f] != f:
+            parent[f] = parent[parent[f]]
+            f = parent[f]
+        return f
+
+    def join(a, b):
+        parent[find(a)] = find(b)
+
+    for i, a in enumerate(files):
+        for b in files[i + 1:]:
+            la, lb = looks.get(a), looks.get(b)
+            if la and lb and _bits_apart(la, lb) <= 12:
+                join(a, b)
+    if not any(looks.get(f) for f in files):  # no picture hashes: frames 1-3 apart are a series
+        nums = sorted((n, f) for f in files if (n := _name_number(f)) is not None)
+        for (n1, a), (n2, b) in zip(nums, nums[1:]):
+            if n2 - n1 <= 3:
+                join(a, b)
+    groups = {}
+    for f in files:
+        groups.setdefault(find(f), []).append(f)
+    pools = list(groups.values())
+    for g in pools:
+        rnd.shuffle(g)
+    rnd.shuffle(pools)
+    order, recent = [], []
+    while any(pools):
+        live = [g for g in pools if g]
+        far = [g for g in live if id(g) not in recent] or live
+        most = max(len(g) for g in far)
+        pick = rnd.choice([g for g in far if len(g) == most])  # biggest series first
+        order.append(pick.pop())
+        recent = (recent + [id(pick)])[-2:]  # not the same series within the next two
+    return order
+
+
 class Batch:
     def __init__(self, folder):
         self.folder = os.path.abspath(folder)
@@ -590,12 +824,55 @@ class Batch:
             (f for f in os.listdir(self.folder)
              if f.lower().endswith(IMAGE_EXT) and not f.startswith(".")),
             key=str.lower)
+        self.sha, self.look, self.stat = {}, {}, {}
         for f in self.files:
-            m, thumb = read_photo(os.path.join(self.folder, f))
+            p = os.path.join(self.folder, f)
+            m, thumb = read_photo(p)
             self.meta[f] = m
             if thumb:
                 self.thumbs[f] = thumb
+            self.sha[f] = file_sha256(p)
+            self.stat[f] = stat_key(p)
+            self.look[f] = picture_hash(p)
+        by_sha = {}
+        for f in self.files:
+            by_sha.setdefault(self.sha[f], []).append(f)
+        self.twins = {f: [g for g in by_sha[self.sha[f]] if g != f] for f in self.files}
+        self.sent = self._load_sent()
+        self.history = load_history()
         self.state = self._load_state()
+
+    def _load_sent(self):
+        try:
+            with open(os.path.join(self.folder, UPLOAD_LOG_NAME), encoding="utf-8") as fh:
+                return {k: set(v) for k, v in json.load(fh).items()}
+        except (OSError, ValueError):
+            return {}
+
+    def changed_originals(self):
+        """Originals that changed since StockUp opened them (StockUp never writes to them)."""
+        bad = []
+        for f in self.files:
+            p = os.path.join(self.folder, f)
+            try:
+                if stat_key(p) != self.stat[f]:
+                    bad.append(f)
+            except OSError:
+                bad.append(f)
+        return bad
+
+    def sent_before(self, f, site):
+        """(how it matched, entry) if this photo went to this site from another batch."""
+        e = self.history["sha"].get(self.sha[f], {}).get(site)
+        if e and not (e["batch"] == self.folder and e["file"] == f):
+            return "exact", e
+        look = self.look.get(f)
+        if look:
+            for lk, st, date, folder, name in self.history["looks"]:
+                if st == site and not (folder == self.folder and name == f) \
+                        and _bits_apart(look, lk) <= 4:
+                    return "looks", {"date": date, "batch": folder, "file": name}
+        return None, None
 
     # ---- state -------------------------------------------------------------
     def _load_state(self):
@@ -613,6 +890,7 @@ class Batch:
                 s["editorial"] = bool(self.auto_reason(f, opts))
             s.setdefault("ss_cats", [])
             s.setdefault("adobe_cat", None)
+            s.setdefault("dt_cats", [])
             s.setdefault("ed_city", m["city"])
             s.setdefault("ed_region", m["country"] or m["state"])
             s.setdefault("ed_date", m["date"])
@@ -631,6 +909,8 @@ class Batch:
                     "editorial": bool(s.get("editorial")),
                     "ss_cats": [c for c in s.get("ss_cats", []) if c in SHUTTERSTOCK_CATEGORIES][:2],
                     "adobe_cat": int(cat) if cat and int(cat) in ADOBE_CATEGORIES else None,
+                    "dt_cats": [int(c) for c in s.get("dt_cats", [])
+                                if str(c).isdigit() and int(c) in DREAMSTIME_CODES][:3],
                     "ed_city": str(s.get("ed_city", "")).strip(),
                     "ed_region": str(s.get("ed_region", "")).strip(),
                     "ed_date": str(s.get("ed_date", "")).strip(),
@@ -680,7 +960,8 @@ class Batch:
                         avail = [i["fix"] for i in issues if i.get("fix") and not i.get("applied")]
                         todo = avail if code == "*" else [c for c in avail if c == code]
                         for c in todo:
-                            if c in COPY_FIXES and not have_pillow():
+                            if c in COPY_FIXES and (not have_pillow()
+                                                    or load_options()["photo_mode"] != "adjusted"):
                                 continue
                             s["fixes"].append(f"{st}:{c}")
                             n += 1
@@ -711,11 +992,13 @@ class Batch:
         info = m["info"]
         keep = opts["caption_mode"] == "keep"
         applied = {c.split(":", 1)[1] for c in s["fixes"] if c.startswith(site + ":")}
+        adjusted = opts["photo_mode"] == "adjusted"
         issues = []
 
         def issue(level, text, fix=None):
-            issues.append({"level": level, "text": text, "fix": fix,
-                           "applied": bool(fix and fix in applied),
+            locked = bool(fix in COPY_FIXES and not adjusted)
+            issues.append({"level": level, "text": text, "fix": fix, "locked": locked,
+                           "applied": bool(fix and fix in applied and not locked),
                            "needs_pillow": bool(fix in COPY_FIXES and not have_pillow())})
 
         title = m["title"] or m["description"]
@@ -726,7 +1009,23 @@ class Batch:
             kws = [k for k in kws if k.lower() != marker]
         px = info["width"] * info["height"]
         mp = px / 1e6
-        ops, name = set(), f
+        ops, name, scale = set(), f, 1.0
+        sent = f in self.sent.get(site, set())
+
+        # --- sent before?
+        if not sent:
+            how, e = self.sent_before(f, site)
+            if how:
+                where = os.path.basename(e["batch"].rstrip("/\\")) or e["batch"]
+                what = "This exact photo" if how == "exact" else "A photo that looks the same"
+                text = (f"{what} was sent to {rules['label']} on {e['date']} "
+                        f"({e['file']} in {where}).")
+                if opts["skip_sent"] and how == "exact":
+                    issue("block", text + " Skipped so you don't send it twice.")
+                else:
+                    issue("warn", text + " Check it isn't a duplicate.")
+        if self.twins.get(f):
+            issue("warn", f"Same file as {', '.join(self.twins[f])} in this batch.")
 
         # --- the photo itself
         if rules.get("min_px") and px and px < rules["min_px"]:
@@ -758,6 +1057,40 @@ class Batch:
         if rules.get("baseline") and info.get("progressive"):
             issue("fix", "Saved as a progressive JPEG. Alamy asks for standard (baseline) JPEGs "
                          "to avoid processing errors.", "baseline")
+
+        # --- your resize-for-upload setting (copies only, never below the site's minimum)
+        if adjusted and opts["resize_mode"] != "off" and px:
+            try:
+                val = float(opts["resize_value"])
+            except ValueError:
+                val = 0
+            if val > 0:
+                if opts["resize_mode"] == "long_side":
+                    k = val / max(info["width"], info["height"])
+                else:
+                    k = math.sqrt(val * 1e6 / px)
+                floor = rules.get("min_px", 0) * 1.02
+                if rules.get("min_side"):
+                    floor = max(floor, (rules["min_side"] / min(info["width"], info["height"])) ** 2 * px)
+                note = ""
+                if k < 1 and px * k * k < floor:
+                    k = math.sqrt(floor / px)
+                    note = f" (kept above {rules['label']}'s minimum)"
+                if k < 0.999:
+                    scale = k
+                    ops.add("downscale")
+                    issue("info", f"Resized for upload to {round(info['width'] * k)} \u00d7 "
+                                  f"{round(info['height'] * k)} px{note}, from your Settings. "
+                                  f"Your original stays full size.")
+        if info.get("gps"):
+            if opts["strip_gps"]:
+                ops.add("nogps")
+                issue("info", "Has a GPS location; it's left out of the uploaded copy. "
+                              "Pixels are not changed.")
+            else:
+                issue("warn", "Has a GPS location (where it was taken), which some sites keep in "
+                              "the file buyers download. To leave it out, turn on \u201cRemove GPS "
+                              "location\u201d in Settings.")
 
         # --- file name
         if rules.get("safe_names") and safe_name(f) != f:
@@ -816,12 +1149,17 @@ class Batch:
             issue("warn", "Adobe only accepts illustrative editorial (no news or event photos). "
                           "Skip Adobe for this one unless it fits.")
 
-        for c in COPY_FIXES & applied:
-            if any(i["fix"] == c for i in issues):
-                ops.add(c)
+        if adjusted:
+            for c in COPY_FIXES & applied:
+                if any(i["fix"] == c for i in issues):
+                    ops.add(c)
+        if site == "dreamstime" and not s["dt_cats"]:
+            issue("warn", "No Dreamstime category chosen yet (for the Dreamstime spreadsheet).")
 
         blocked = any(i["level"] == "block" for i in issues)
-        if site in s["skip"]:
+        if sent:
+            status = "sent"
+        elif site in s["skip"]:
             status = "skip"
         elif blocked and site not in s["force"]:
             status = "skip"
@@ -833,8 +1171,8 @@ class Batch:
             status = "ok"
         return {"status": status, "include": status != "skip", "issues": issues,
                 "name": name, "title": title, "desc": desc, "keywords": kws,
-                "ops": sorted(ops), "user_skipped": site in s["skip"],
-                "forced": site in s["force"]}
+                "ops": sorted(ops), "scale": scale, "user_skipped": site in s["skip"],
+                "forced": site in s["force"], "sent": sent}
 
     def items(self):
         opts = load_options()
@@ -844,11 +1182,13 @@ class Batch:
             sites = {}
             for st in opts["my_sites"]:
                 p = self.plan(f, st, opts)
-                sites[st] = {k: p[k] for k in ("status", "issues", "user_skipped", "forced")}
+                sites[st] = {k: p[k] for k in ("status", "issues", "user_skipped", "forced",
+                                               "ops")}
             out.append({"file": f, "title": m["title"], "description": m["description"],
                         "keywords": m["keywords"], "info": m["info"], "label": m.get("label", ""),
                         "preformatted": looks_editorial(m["description"]) or looks_editorial(m["title"]),
-                        "auto": self.auto_reason(f, opts), "sites": sites, **self.state[f]})
+                        "auto": self.auto_reason(f, opts), "sites": sites,
+                        "twins": self.twins.get(f, []), **self.state[f]})
         return out
 
     def thumbnail(self, f):
@@ -881,7 +1221,7 @@ class Batch:
         d = os.path.join(self.out, site, "files")
         os.makedirs(d, exist_ok=True)
         dst = os.path.join(d, plan["name"])
-        stamp = "|".join(plan["ops"]) + f"|{os.path.getmtime(src)}"
+        stamp = "|".join(plan["ops"]) + f"|{plan['scale']:.5f}|{os.stat(src).st_mtime_ns}"
         marker = dst + ".stockup"
         try:
             if os.path.exists(dst) and open(marker).read() == stamp:
@@ -889,11 +1229,9 @@ class Batch:
         except OSError:
             pass
         if plan["ops"]:
-            make_copy(src, dst, set(plan["ops"]), SITES[site])
-        else:
-            if os.path.exists(dst):
-                os.remove(dst)
-            link_or_copy(src, dst)
+            make_copy(src, dst, set(plan["ops"]), SITES[site], plan["scale"])
+        else:  # renamed only: an exact byte-for-byte copy
+            copy_file(src, dst, replace=True)
         with open(marker, "w") as fh:
             fh.write(stamp)
         return dst
@@ -924,9 +1262,64 @@ def _insert_segments(jpeg, segs):
     return jpeg[:i] + segs + jpeg[i:]
 
 
-def make_copy(src, dst, ops, rules):
-    from PIL import Image
+def strip_gps_bytes(jpeg):
+    """Blank out GPS location in EXIF and XMP without touching the image data.
+    The file keeps the same size; only the location bytes become zeros/spaces."""
+    data = bytearray(jpeg)
+    i = 2
+    while i + 4 <= len(data) and data[i] == 0xFF:
+        marker = data[i + 1]
+        if marker in (0xDA, 0xD9):
+            break
+        ln = int.from_bytes(data[i + 2:i + 4], "big")
+        seg_start, seg_end = i + 4, i + 2 + ln
+        if marker == 0xE1 and data[seg_start:seg_start + 6] == b"Exif\x00\x00":
+            t0 = seg_start + 6
+            end = "<" if data[t0:t0 + 2] == b"II" else ">"
+
+            def u16(o):
+                return struct.unpack(end + "H", bytes(data[t0 + o:t0 + o + 2]))[0]
+
+            def u32(o):
+                return struct.unpack(end + "I", bytes(data[t0 + o:t0 + o + 4]))[0]
+            try:
+                ifd0 = u32(4)
+                for e in range(u16(ifd0)):
+                    p = ifd0 + 2 + e * 12
+                    if u16(p) == 0x8825:
+                        g = u32(p + 8)
+                        sizes = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8, 11: 4, 12: 8}
+                        n = u16(g)
+                        for k in range(n):
+                            q = g + 2 + k * 12
+                            size = sizes.get(u16(q + 2), 1) * u32(q + 4)
+                            if size > 4:
+                                off = u32(q + 8)
+                                data[t0 + off:t0 + off + size] = bytes(size)
+                            data[t0 + q:t0 + q + 12] = bytes(12)
+                        data[t0 + g:t0 + g + 2] = bytes(2)  # the GPS block now holds nothing
+            except (struct.error, IndexError):
+                pass
+        elif marker == 0xE1 and bytes(data[seg_start:seg_start + 29]).startswith(b"http://ns.adobe.com/xap/1.0/"):
+            seg = bytes(data[seg_start:seg_end])
+            seg = re.sub(rb'exif:GPS\w+="[^"]*"', lambda m: b" " * len(m.group(0)), seg)
+            seg = re.sub(rb"<exif:GPS(\w+)[^>]*>.*?</exif:GPS\1>", lambda m: b" " * len(m.group(0)),
+                         seg, flags=re.S)
+            data[seg_start:seg_end] = seg
+        i = seg_end
+    return bytes(data)
+
+
+def make_copy(src, dst, ops, rules, scale=1.0):
     raw = open(src, "rb").read()
+    if not (ops - {"nogps"}):  # only the GPS location changes: no re-saving, pixels untouched
+        data = strip_gps_bytes(raw) if "nogps" in ops else raw
+        tmp = dst + ".part"
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, dst)
+        return
+    from PIL import Image
     im = Image.open(BytesIO(raw))
     icc = im.info.get("icc_profile")
     out_icc = None
@@ -944,6 +1337,9 @@ def make_copy(src, dst, ops, rules):
         out_icc = ImageCms.ImageCmsProfile(srgb).tobytes()
     else:
         out_icc = icc
+    if "downscale" in ops and scale < 1:
+        im = im.resize((max(1, round(im.width * scale)), max(1, round(im.height * scale))),
+                       Image.LANCZOS)
     if "resize" in ops and rules.get("max_px"):
         px = im.width * im.height
         if px > rules["max_px"]:
@@ -968,19 +1364,23 @@ def make_copy(src, dst, ops, rules):
             im.save(buf, "JPEG", quality=85, progressive=False, optimize=True,
                     **({"icc_profile": out_icc} if out_icc else {}))
             data = _insert_segments(buf.getvalue(), segs)
+    if "nogps" in ops:
+        data = strip_gps_bytes(data)
     tmp = dst + ".part"
     with open(tmp, "wb") as fh:
         fh.write(data)
     os.replace(tmp, dst)
 
 
-def link_or_copy(src, dst):
+def copy_file(src, dst, replace=False):
+    """A real copy (never a link), so nothing done to it can reach your original."""
     if os.path.exists(dst):
-        return
-    try:
-        os.link(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
+        if not replace:
+            return
+        os.remove(dst)
+    tmp = dst + ".part"
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dst)
 
 
 # --------------------------------------------------------------------------
@@ -1005,6 +1405,8 @@ def build_outputs(batch, progress=None):
         rules = SITES[site]
         sd = os.path.join(out, site)
         os.makedirs(sd, exist_ok=True)
+        if os.path.isdir(os.path.join(sd, "files")):  # start fresh: no leftover copies
+            shutil.rmtree(os.path.join(sd, "files"))
         rows, editorial, included, skipped, problems = [], [], [], [], 0
         for f in batch.files:
             p = batch.plan(f, site, opts)
@@ -1047,6 +1449,15 @@ def build_outputs(batch, progress=None):
                       [[p["name"], p["desc"], ",".join(p["keywords"]),
                         "yes" if s["editorial"] else "no", "no", ""] for f, p, s in rows])
             files.append("depositphotos.csv")
+        elif site == "dreamstime":
+            write_csv(os.path.join(sd, "dreamstime.csv"),
+                      ["Filename", "Image Name", "Description", "Category 1", "Category 2",
+                       "Category 3", "keywords", "Free", "W-EL", "P-EL", "SR-EL", "SR-Price",
+                       "Editorial", "MR doc Ids", "Pr Docs"],
+                      [[p["name"], p["title"], p["desc"],
+                        *(list(s["dt_cats"]) + [0, 0, 0])[:3], ",".join(p["keywords"]),
+                        0, 0, 0, 0, 0, 1 if s["editorial"] else 0, "", ""] for f, p, s in rows])
+            files.append("dreamstime.csv")
         elif site == "123rf":
             write_csv(os.path.join(sd, "123rf.csv"),
                       ["oldfilename", "123rf_filename", "description", "keywords", "country"],
@@ -1071,15 +1482,15 @@ def build_outputs(batch, progress=None):
                     shutil.rmtree(d)
                 os.makedirs(d)
             for f, p, s in rows:
-                link_or_copy(batch.site_file(f, site, p),
-                             os.path.join(sd, "editorial" if s["editorial"] else "creative", p["name"]))
+                copy_file(batch.site_file(f, site, p),
+                          os.path.join(sd, "editorial" if s["editorial"] else "creative", p["name"]))
             files += ["creative/", "editorial/"]
         if site in ("adobe", "dreamstime", "alamy", "123rf"):
             with open(os.path.join(sd, "editorial_list.txt"), "w", encoding="utf-8") as fh:
                 fh.write("\n".join(editorial) + ("\n" if editorial else ""))
             files.append("editorial_list.txt")
         if os.path.isdir(os.path.join(sd, "files")):
-            files.append("files/  (fixed copies)")
+            files.append("files/  (copies made for this site)")
         summary.append({"site": site, "label": rules["label"], "folder": sd, "files": files,
                         "included": len(included), "skipped": len(skipped),
                         "editorial": len(editorial), "problems": problems,
@@ -1088,7 +1499,9 @@ def build_outputs(batch, progress=None):
     with open(os.path.join(out, "checks.txt"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(report) + "\n" if report else "No problems found.\n")
     return {"folder": out, "sites": summary, "warnings": report, "count": len(batch.files),
-            "editorial": sum(1 for f in batch.files if batch.state[f]["editorial"])}
+            "editorial": sum(1 for f in batch.files if batch.state[f]["editorial"]),
+            "changed_originals": batch.changed_originals(),
+            "mode": opts["photo_mode"]}
 
 
 # --------------------------------------------------------------------------
@@ -1132,9 +1545,14 @@ def _render_ini(values):
                   f"password = {v.get('password', '')}",
                   f"remote_dir = {v.get('remote_dir') or '/'}", ""]
     tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # readable by you only
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
     os.replace(tmp, CONFIG_PATH)
+    try:
+        os.chmod(CONFIG_PATH, 0o600)
+    except OSError:
+        pass
 
 
 def _read_ini():
@@ -1240,21 +1658,64 @@ def logins_summary():
 # Uploading
 # --------------------------------------------------------------------------
 
+class _TLS(ftplib.FTP_TLS):
+    """FTP over TLS that reuses the login session for file transfers. Many servers
+    (including stock agencies') refuse transfers without this; plain ftplib doesn't do it."""
+
+    def ntransfercmd(self, cmd, rest=None):
+        conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
+        if self._prot_p:
+            conn = self.context.wrap_socket(conn, server_hostname=self.host,
+                                            session=self.sock.session)
+        return conn, size
+
+
 class FTPConn:
-    def __init__(self, site, timeout=60):
-        self.ftp = ftplib.FTP_TLS(timeout=timeout) if site["protocol"] == "ftps" \
-            else ftplib.FTP(timeout=timeout)
-        self.ftp.connect(site["host"], site["port"])
-        self.ftp.login(site["username"], site["password"])
-        if site["protocol"] == "ftps":
-            self.ftp.prot_p()
-        self.ftp.set_pasv(True)
+    """protocol ftps: always encrypted. protocol ftp: tries encryption first, and falls
+    back to plain FTP only if the site doesn't offer it (and you allow that)."""
+
+    def __init__(self, site, timeout=60, encrypted_only=False):
+        self.encrypted = False
+        tls_error = None
+        if site["protocol"] in ("ftps", "ftp"):
+            try:
+                self.ftp = _TLS(timeout=timeout)
+                self.ftp.connect(site["host"], site["port"])
+                self.ftp.auth()
+                self.ftp.login(site["username"], site["password"])
+                self.ftp.prot_p()
+                self.ftp.set_pasv(True)
+                self._cd(site)
+                self.ftp.nlst()  # proves encrypted file transfers work, not just the login
+                self.encrypted = True
+            except ftplib.error_perm as e:
+                if str(e).startswith("530"):  # wrong username or password
+                    raise
+                tls_error = e
+            except (ftplib.Error, ssl.SSLError, OSError, EOFError) as e:
+                tls_error = e
+            if not self.encrypted:
+                try:
+                    self.ftp.close()
+                except Exception:
+                    pass
+                if site["protocol"] == "ftps" or encrypted_only:
+                    raise RuntimeError(f"{site['host']} wouldn't make an encrypted connection "
+                                       f"({tls_error}).")
+        if not self.encrypted:
+            self.ftp = ftplib.FTP(timeout=timeout)
+            self.ftp.connect(site["host"], site["port"])
+            self.ftp.login(site["username"], site["password"])
+            self.ftp.set_pasv(True)
+            self._cd(site)
+
+    def _cd(self, site):
         if site["remote_dir"] not in ("", "/"):
             self.ftp.cwd(site["remote_dir"])
 
     def listdir(self):
         try:
-            return self.ftp.nlst()
+            return [n.rsplit("/", 1)[-1] for n in self.ftp.nlst()]
         except ftplib.error_perm:
             return []
 
@@ -1280,7 +1741,9 @@ class FTPConn:
 
 
 class SFTPConn:
-    def __init__(self, site, timeout=60):
+    encrypted = True
+
+    def __init__(self, site, timeout=60, encrypted_only=False):
         try:
             import paramiko
         except ImportError:
@@ -1314,16 +1777,77 @@ class SFTPConn:
 def connect(site):
     if not site["username"] or not site["password"]:
         raise RuntimeError("login not set yet - add it under Logins")
-    return SFTPConn(site) if site["protocol"] == "sftp" else FTPConn(site)
+    enc_only = load_options()["encrypted_only"]
+    cls = SFTPConn if site["protocol"] == "sftp" else FTPConn
+    return cls(site, encrypted_only=enc_only)
+
+
+def connection_label(protocol):
+    if protocol == "sftp":
+        return "Encrypted (SFTP)"
+    if protocol == "ftps":
+        return "Encrypted (FTPS)"
+    if load_options()["encrypted_only"]:
+        return "Encrypted only (skipped if the site can't)"
+    return "Tries encryption first; plain FTP if the site doesn't offer it"
+
+
+def upload_preview(batch, only):
+    """Exactly what Upload would send, per site, before anything leaves your computer."""
+    opts = load_options()
+    logins = {s["name"]: s for s in load_sites()}
+    out = []
+    for site in only:
+        if site not in logins:
+            continue
+        send, ed, copies, renamed, sent, notsend, size = 0, 0, 0, 0, 0, 0, 0
+        for f in batch.files:
+            p = batch.plan(f, site, opts)
+            if p["sent"]:
+                sent += 1
+                continue
+            if not p["include"]:
+                notsend += 1
+                continue
+            send += 1
+            ed += bool(batch.state[f]["editorial"])
+            copies += bool(p["ops"])
+            renamed += p["name"] != f
+            size += os.path.getsize(os.path.join(batch.folder, f))
+        out.append({"site": site, "label": SITES[site]["label"], "send": send, "editorial": ed,
+                    "copies": copies, "renamed": renamed, "already": sent, "not_sending": notsend,
+                    "mb": round(size / 1048576), "host": logins[site]["host"],
+                    "connection": connection_label(logins[site]["protocol"])})
+    return {"sites": out, "mode": opts["photo_mode"], "strip_gps": opts["strip_gps"],
+            "order": opts["upload_order"], "pacing": opts["upload_pacing"]}
+
+
+def send_sheet(batch, site):
+    """Put a site's spreadsheet on its FTP (Dreamstime reads dreamstime.csv from there)."""
+    sheet = SITES[site].get("sheet")
+    path = os.path.join(batch.out, site, sheet or "")
+    if not sheet or not os.path.exists(path):
+        raise RuntimeError("Click “Make site files” first.")
+    login = next(s for s in load_sites() if s["name"] == site)
+    c = connect(login)
+    try:
+        c.put(path, sheet, lambda n: None)
+        enc = c.encrypted
+    finally:
+        c.close()
+    return {"ok": True, "message": f"Sent {sheet} to {SITES[site]['label']}"
+                                   f"{' over an encrypted connection' if enc else ''}."}
 
 
 class Uploader:
     def __init__(self, batch):
         self.batch = batch
         self.log_path = os.path.join(batch.folder, UPLOAD_LOG_NAME)
+        self.receipt_path = os.path.join(batch.out, "upload_receipt.csv")
         self.lock = threading.Lock()
         self.progress = {}
         self.running = False
+        self.stop_requested = False
 
     def _load_log(self):
         try:
@@ -1332,7 +1856,7 @@ class Uploader:
         except (OSError, ValueError):
             return {}
 
-    def _mark_done(self, site, f):
+    def _mark_done(self, site, f, sent_as, local, encrypted):
         with self.lock:
             log = self._load_log()
             log.setdefault(site, [])
@@ -1342,10 +1866,28 @@ class Uploader:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(log, fh, indent=1)
             os.replace(tmp, self.log_path)
+            self.batch.sent.setdefault(site, set()).add(f)
+            os.makedirs(self.batch.out, exist_ok=True)
+            new = not os.path.exists(self.receipt_path)
+            with open(self.receipt_path, "a", encoding="utf-8", newline="") as fh:
+                w = csv.writer(fh)
+                if new:
+                    w.writerow(["time", "site", "photo", "sent as", "bytes", "exact original",
+                                "encrypted", "sha256 of what was sent"])
+                same = os.path.abspath(local) == os.path.join(self.batch.folder, f)
+                w.writerow([datetime.now().isoformat(timespec="seconds"), SITES[site]["label"], f,
+                            sent_as, os.path.getsize(local), "yes" if same else "no (copy)",
+                            "yes" if encrypted else "no",
+                            self.batch.sha[f] if same else file_sha256(local)])
+        record_history(site, self.batch.folder, f, self.batch.sha[f], self.batch.look.get(f, ""))
 
     def status(self):
         with self.lock:
-            return {"running": self.running, "sites": json.loads(json.dumps(self.progress))}
+            return {"running": self.running, "stopping": self.stop_requested and self.running,
+                    "sites": json.loads(json.dumps(self.progress))}
+
+    def stop(self):
+        self.stop_requested = True
 
     def start(self, only=None):
         if self.running:
@@ -1356,27 +1898,45 @@ class Uploader:
             sites = [s for s in load_sites() if s["enabled"]]
         if not sites:
             return False
-        log = self._load_log()
+        self.stop_requested = False
         with self.lock:
             self.running = True
             self.progress = {}
             for s in sites:
-                todo = [f for f in self.batch.files if self.batch.plan(f, s["name"])["include"]]
-                done = [f for f in todo if f in log.get(s["name"], [])]
+                plans = {f: self.batch.plan(f, s["name"]) for f in self.batch.files}
+                todo = [f for f in self.batch.files if plans[f]["include"]]
+                done = [f for f in todo if plans[f]["sent"]]
                 size = sum(os.path.getsize(os.path.join(self.batch.folder, f)) for f in todo)
                 self.progress[s["name"]] = {
                     "state": "waiting", "done": len(done), "total": len(todo),
                     "bytes": sum(os.path.getsize(os.path.join(self.batch.folder, f)) for f in done),
-                    "total_bytes": size or 1, "current": "", "errors": [], "skipped": len(done),
-                    "left_out": len(self.batch.files) - len(todo)}
-        threads = [threading.Thread(target=self._run_site, args=(s,), daemon=True) for s in sites]
+                    "total_bytes": size or 1, "current": "", "errors": [], "notes": [],
+                    "skipped": len(done), "left_out": len(self.batch.files) - len(todo),
+                    "encrypted": None}
+        if load_options()["upload_pacing"] == "one_by_one":
+            def in_turn():
+                for s in sites:
+                    if self.stop_requested:
+                        self._set(s["name"], state="stopped")
+                        continue
+                    self._run_site(s)
+            threads = [threading.Thread(target=in_turn, daemon=True)]
+        else:
+            threads = [threading.Thread(target=self._run_site, args=(s,), daemon=True)
+                       for s in sites]
         for t in threads:
             t.start()
 
         def waiter():
             for t in threads:
                 t.join()
+            changed = self.batch.changed_originals()
             with self.lock:
+                if changed:
+                    for p in self.progress.values():
+                        p["errors"].append("These originals changed while StockUp was open "
+                                           "(StockUp never writes to them, so another app did): "
+                                           + ", ".join(changed))
                 self.running = False
         threading.Thread(target=waiter, daemon=True).start()
         return True
@@ -1389,32 +1949,58 @@ class Uploader:
         with self.lock:
             self.progress[site]["errors"].append(msg)
 
+    def _note(self, site, msg):
+        with self.lock:
+            self.progress[site]["notes"].append(msg)
+
     def _run_site(self, site):
         name = site["name"]
-        done_log = set(self._load_log().get(name, []))
-        todo = [f for f in self.batch.files
-                if self.batch.plan(f, name)["include"] and f not in done_log]
-        conn, failures_in_row, last = None, 0, ""
+        opts = load_options()
+        todo = [f for f in self.batch.files if self.batch.plan(f, name)["include"]
+                and f not in self.batch.sent.get(name, set())]
+        if opts["upload_order"] == "spread":
+            todo = spread_order(todo, self.batch.look,
+                                f"{self.batch.folder}|{name}|{datetime.now():%Y-%m-%d}")
+        conn, failures_in_row, last, on_server = None, 0, "", set()
+        sent_now = {self.batch.sha[f] for f in self.batch.sent.get(name, set())}
         for f in todo:
+            if opts["skip_sent"] and self.batch.sha[f] in sent_now:
+                self._note(name, f"{f} is the same file as one already sent to "
+                                 f"{SITES[name]['label']}, so it was skipped.")
+                continue
+            if self.stop_requested:
+                self._set(name, state="stopped", current="")
+                if conn:
+                    conn.close()
+                return
             try:
                 plan = self.batch.plan(f, name)
                 local = self.batch.site_file(f, name, plan)
             except Exception as e:
                 self._err(name, f"{f}: couldn't prepare the file ({e})")
                 continue
-            ok = False
+            ok, skipped = False, False
             for attempt in range(3):
                 start_bytes = self.progress[name]["bytes"]
                 try:
                     if conn is None:
                         self._set(name, state="connecting")
                         conn = connect(site)
+                        on_server = set(conn.listdir())
+                        self._set(name, encrypted=conn.encrypted)
+                    if plan["name"] in on_server:
+                        self._note(name, f"{plan['name']} is already on the {SITES[name]['label']} "
+                                         f"server, so it wasn't sent again or overwritten.")
+                        skipped = True
+                        break
                     self._set(name, state="uploading", current=f)
 
                     def prog(n, _name=name):
                         with self.lock:
                             self.progress[_name]["bytes"] += n
                     conn.put(local, plan["name"], prog)
+                    on_server.add(plan["name"])
+                    sent_now.add(self.batch.sha[f])
                     ok = True
                     break
                 except Exception as e:
@@ -1424,17 +2010,18 @@ class Uploader:
                     conn = None
                     last = str(e) or e.__class__.__name__
                     low = last.lower()
-                    if "530" in last or "login" in low or "auth" in low or "paramiko" in low:
+                    if "530" in last or "login" in low or "auth" in low or "paramiko" in low \
+                            or "encrypted connection" in low:
                         self._set(name, state="error", current="")
-                        self._err(name, f"Couldn't sign in: {last}")
+                        self._err(name, f"Couldn't connect: {last}")
                         return
                     time.sleep(2 * (attempt + 1))
             if ok:
                 failures_in_row = 0
-                self._mark_done(name, f)
+                self._mark_done(name, f, plan["name"], local, conn.encrypted if conn else False)
                 with self.lock:
                     self.progress[name]["done"] += 1
-            else:
+            elif not skipped:
                 failures_in_row += 1
                 self._err(name, f"{f}: {last}")
                 if failures_in_row >= 5:
@@ -1476,6 +2063,7 @@ def test_sites():
         try:
             c = connect(s)
             r["listing"] = c.listdir()[:30]
+            r["encrypted"] = c.encrypted
             c.close()
             r["result"] = "OK"
         except Exception as e:
@@ -1608,6 +2196,7 @@ button.edbtn{border-color:var(--ed);color:var(--ed)}
 button.small{padding:2px 8px;font-size:12px}
 button.link{border:none;background:none;color:var(--accent);padding:2px 4px}
 input{width:120px}input[type=date]{width:150px}
+#dtGroup select{max-width:200px}
 input[type=checkbox],input[type=radio]{width:auto;padding:0;margin:0}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .seg button{border:none;border-radius:0;padding:4px 9px;font-size:12px}
@@ -1635,6 +2224,20 @@ main{padding:14px 16px 130px}
 .chip.warn{color:var(--warn);border-color:var(--warn)}
 .chip.fix{background:var(--warn);border-color:var(--warn);color:var(--panel)}
 .chip.skip{color:var(--mute);text-decoration:line-through;opacity:.75}
+.chip.sent{background:var(--ok);border-color:var(--ok);color:var(--panel)}
+.mode{font-size:11px;font-weight:600;padding:2px 8px;border-radius:9px;border:1px solid var(--ok);color:var(--ok);white-space:nowrap;cursor:pointer}
+.mode.adj{border-color:var(--warn);color:var(--warn)}
+#dock{position:fixed;left:16px;bottom:64px;width:min(380px,calc(100% - 32px));display:none;flex-direction:column;gap:8px;z-index:8}
+.pcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px;box-shadow:0 6px 20px var(--shadow);font-size:13px}
+.pcard .row1{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.pcard .big{height:10px}
+.pcard.done .prog i{background:var(--ok)}.pcard.bad .prog i{background:var(--ed)}
+.lock{font-size:11px;color:var(--ok)}.lock.no{color:var(--warn)}
+.dockbar{display:flex;gap:6px;justify-content:flex-end}
+table.pv{border-collapse:collapse;width:100%;font-size:13px;margin:6px 0}
+table.pv td,table.pv th{padding:4px 6px;border-top:1px solid var(--line);text-align:left;vertical-align:top}
+table.pv th{font-size:12px;color:var(--mute);font-weight:600}
+.ok{color:var(--ok)}
 .check{position:absolute;top:6px;left:6px;width:22px;height:22px;border-radius:50%;background:#ffffffd9;border:2px solid #00000059;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff}
 .card.sel .check{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 footer{position:fixed;bottom:0;left:0;right:0;background:var(--panel);border-top:1px solid var(--line);padding:9px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
@@ -1664,7 +2267,7 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
 </style></head><body>
 <header>
   <div class="top">
-    <h1>StockUp</h1><span class="sub" id="folder"></span>
+    <h1>StockUp</h1><span class="sub" id="folder"></span><span class="mode" id="mode" onclick="openSettings()"></span>
     <button onclick="openChecks()" id="checksBtn">Check photos</button>
     <div class="seg" id="theme" title="Light or dark look">
       <button data-t="auto">Auto</button><button data-t="light">Light</button><button data-t="dark">Dark</button>
@@ -1696,6 +2299,10 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
       <button onclick="applySS()">Set</button>
     </div>
     <div class="group" id="adGroup"><b>Adobe category</b><select id="ad"></select><button onclick="applyAd()">Set</button></div>
+    <div class="group" id="dtGroup"><b>Dreamstime category</b>
+      <select id="dt1"></select><select id="dt2"></select><select id="dt3"></select>
+      <button onclick="applyDT()">Set</button>
+    </div>
     <div class="group"><b>Editorial: where &amp; when</b>
       <input id="ecity" placeholder="City"><input id="eregion" placeholder="State or country">
       <input id="edate" type="date"><button onclick="applyLoc()">Set</button>
@@ -1704,6 +2311,7 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
 </header>
 <main><div class="grid" id="grid"></div></main>
 <div id="panel"></div>
+<div id="dock"></div>
 <footer>
   <span id="msg">Click a photo to pick it. Shift-click to pick a range.</span>
   <div class="sites" id="sites"></div>
@@ -1712,7 +2320,8 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
   <button class="primary" onclick="upload()">Upload</button>
 </footer>
 <script>
-const SS=__SS__, AD=__AD__, SITES=__SITES__, FIXES=__FIXES__;
+const SS=__SS__, AD=__AD__, SITES=__SITES__, FIXES=__FIXES__, DT=__DT__;
+const DTNAME=Object.fromEntries(DT.map(([n,c])=>[c,n.replace(' -> ',' › ')]));
 let items=[], sel=new Set(), last=null, dirty=false, saveT=null, opts={}, sites=[], VERSION='', FROZEN=false, PILLOW=true, openDetail=null;
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
@@ -1736,16 +2345,19 @@ setTheme(document.documentElement.dataset.theme||'auto');
 function fill(){
   for(const id of ['ss1','ss2'])$(id).innerHTML=`<option value="">${id=='ss1'?'Choose…':'Second (optional)'}</option>`+SS.map(c=>`<option>${c}</option>`).join('');
   $('ad').innerHTML='<option value="">Choose…</option>'+Object.entries(AD).map(([n,c])=>`<option value="${n}">${c}</option>`).join('');
+  const groups={};DT.forEach(([n,c])=>{const [g,sub]=n.split(' -> ');(groups[g]=groups[g]||[]).push([sub,c])});
+  const opts_=Object.entries(groups).map(([g,l])=>`<optgroup label="${esc(g)}">${l.map(([sub,c])=>`<option value="${c}">${esc(sub)}</option>`).join('')}</optgroup>`).join('');
+  ['dt1','dt2','dt3'].forEach((id,i)=>$(id).innerHTML=`<option value="">${['Choose…','Second (optional)','Third (optional)'][i]}</option>`+opts_);
 }
 const my=()=>opts.my_sites||[];
 const hasIssue=it=>Object.values(it.sites).some(s=>s.status=='fix'||s.status=='skip'&&!s.user_skipped);
 function visible(){
   const f=$('filter').value;
   return items.filter(it=>f=='all'||(f=='ed'&&it.editorial)||(f=='com'&&!it.editorial)||
-    (f=='nocat'&&((my().includes('shutterstock')&&!it.ss_cats.length)||(my().includes('adobe')&&!it.adobe_cat)))||(f=='issues'&&hasIssue(it)));
+    (f=='nocat'&&((my().includes('shutterstock')&&!it.ss_cats.length)||(my().includes('adobe')&&!it.adobe_cat)||(my().includes('dreamstime')&&!it.dt_cats.length)))||(f=='issues'&&hasIssue(it)));
 }
 function chips(it){
-  const word={ok:'ready',warn:'ready, with a note',fix:'needs a fix',skip:'not sending'};
+  const word={ok:'ready',warn:'ready, with a note',fix:'needs a fix',skip:'not sending',sent:'sent'};
   return '<div class="chips">'+my().map(s=>{const st=it.sites[s];if(!st)return'';
     return `<span class="chip ${st.status}" title="${esc(lab(s))}: ${word[st.status]}">${esc(SITES[s].short)}</span>`}).join('')+'</div>';
 }
@@ -1763,6 +2375,8 @@ function render(){
     t.push(`<span class="tag">${it.keywords.length} keywords</span>`);
     if(my().includes('shutterstock'))t.push(it.ss_cats.length?`<span class="tag">SS: ${esc(it.ss_cats.join(' + '))}</span>`:'<span class="tag warn">no Shutterstock category</span>');
     if(my().includes('adobe')&&it.adobe_cat)t.push(`<span class="tag">Adobe: ${esc(AD[it.adobe_cat])}</span>`);
+    if(my().includes('dreamstime')&&it.dt_cats.length)t.push(`<span class="tag">DT: ${esc(it.dt_cats.map(c=>DTNAME[c]?.split(' › ').pop()).join(', '))}</span>`);
+    if(it.info.gps)t.push(`<span class="tag ${opts.strip_gps?'':'warn'}" title="Where the photo was taken is saved in the file">${opts.strip_gps?'GPS removed on upload':'has GPS location'}</span>`);
     const mp=(it.info.width*it.info.height/1e6).toFixed(1);
     return `<div class="card ${sel.has(it.file)?'sel':''} ${it.editorial?'ed':''}" data-f="${esc(it.file)}" title="${esc(it.auto?'Marked editorial automatically: '+it.auto:'')}">
       <div class="check">${sel.has(it.file)?'✓':''}</div>
@@ -1773,6 +2387,12 @@ function render(){
   $('selcount').textContent=sel.size+' picked';
   $('ssGroup').style.display=my().includes('shutterstock')?'':'none';
   $('adGroup').style.display=my().includes('adobe')?'':'none';
+  $('dtGroup').style.display=my().includes('dreamstime')?'':'none';
+  const adj=opts.photo_mode=='adjusted';
+  $('mode').className='mode'+(adj?' adj':'');
+  $('mode').textContent=adj?'Adjusted copies allowed':'Exact files only';
+  $('mode').title=adj?'StockUp may make adjusted copies (fixes, resizing) for upload. Your originals are never changed. Click to change.'
+    :'Every site gets your exact original files, byte for byte. Click to change.';
   const n=items.filter(hasIssue).length;
   $('checksBtn').innerHTML='Check photos'+(n?`<span class="count">${n}</span>`:'');
 }
@@ -1792,6 +2412,8 @@ function setEd(v){if(need())each(it=>it.editorial=v)}
 function applySS(){if(!need())return;const c=[$('ss1').value,$('ss2').value].filter(Boolean);
   if(!c.length)return note('Choose a Shutterstock category first.');each(it=>it.ss_cats=[...new Set(c)])}
 function applyAd(){if(!need())return;const v=$('ad').value;if(!v)return note('Choose an Adobe category first.');each(it=>it.adobe_cat=+v)}
+function applyDT(){if(!need())return;const c=[$('dt1').value,$('dt2').value,$('dt3').value].filter(Boolean).map(Number);
+  if(!c.length)return note('Choose a Dreamstime category first.');each(it=>it.dt_cats=[...new Set(c)])}
 function applyLoc(){if(!need())return;const c=$('ecity').value.trim(),r=$('eregion').value.trim(),d=$('edate').value;
   if(!c&&!r&&!d)return note('Type a place or pick a date first.');each(it=>{if(c)it.ed_city=c;if(r)it.ed_region=r;if(d)it.ed_date=d})}
 function note(t){$('msg').textContent=t}
@@ -1799,7 +2421,7 @@ function counts(){const e=items.filter(i=>i.editorial).length;return `${e} edito
 function changed(){dirty=true;render();clearTimeout(saveT);saveT=setTimeout(async()=>{await save();await load()},500)}
 async function save(){
   if(!dirty)return;
-  const body={};items.forEach(it=>body[it.file]={editorial:it.editorial,ss_cats:it.ss_cats,adobe_cat:it.adobe_cat,ed_city:it.ed_city,ed_region:it.ed_region,ed_date:it.ed_date});
+  const body={};items.forEach(it=>body[it.file]={editorial:it.editorial,ss_cats:it.ss_cats,adobe_cat:it.adobe_cat,dt_cats:it.dt_cats,ed_city:it.ed_city,ed_region:it.ed_region,ed_date:it.ed_date});
   try{await api('/api/save',body);dirty=false;note('Saved · '+counts())}catch(e){note(e.message)}
 }
 function panel(html,keepScroll){openDetail=null;const p=$('panel');const y=p.scrollTop;p.innerHTML=html+'<p><button onclick="closePanel()">Close</button></p>';p.style.display='block';p.scrollTop=keepScroll?y:0}
@@ -1808,7 +2430,9 @@ function closePanel(){openDetail=null;$('panel').style.display='none'}
 /* per-site checks */
 function issueRow(i,acts){
   const tag=i.applied?'<span class="lvl done">FIXED</span>':`<span class="lvl ${i.level}">${{block:'WON’T ACCEPT',fix:'FIX',warn:'NOTE',info:'OK'}[i.level]}</span>`;
-  return `<div class="issue"><div>${tag}${esc(i.text)}${i.needs_pillow&&!i.applied?'<div class="hint">This fix needs Pillow: run  pip install pillow  (the StockUp app already has it).</div>':''}</div><div class="acts">${acts}</div></div>`;
+  const lock=i.locked&&!i.applied?'<div class="hint">StockUp can fix this with an adjusted copy, but you’ve chosen to upload exact files only. To allow it, choose “Let StockUp make adjusted copies” in <button class="link small" onclick="openSettings()">Settings</button>. Your original is never changed either way.</div>'
+    :(i.needs_pillow&&!i.applied?'<div class="hint">This fix needs Pillow: run  pip install pillow  (the StockUp app already has it).</div>':'');
+  return `<div class="issue"><div>${tag}${esc(i.text)}${lock}</div><div class="acts">${acts}</div></div>`;
 }
 async function act(files,site,code,action){
   try{await save();const r=await api('/api/fix',{files,site,code,action});await load();
@@ -1817,17 +2441,17 @@ async function act(files,site,code,action){
 }
 function showDetail(f,keepScroll){
   const it=items.find(i=>i.file==f);if(!it)return;
-  let h=`<h3>${esc(f)}</h3><div class="hint">${it.info.width} × ${it.info.height} px · ${(it.info.width*it.info.height/1e6).toFixed(1)} MP · ${(it.info.bytes/1048576).toFixed(1)} MB · ${esc(it.info.color)}${it.info.progressive?' · progressive':''}</div>`;
+  let h=`<h3>${esc(f)}</h3><div class="hint">${it.info.width} × ${it.info.height} px · ${(it.info.width*it.info.height/1e6).toFixed(1)} MP · ${(it.info.bytes/1048576).toFixed(1)} MB · ${esc(it.info.color)}${it.info.quality?' · JPEG quality ~'+it.info.quality:''}${it.info.progressive?' · progressive':''}${it.info.gps?' · has GPS location':''}</div>`;
   for(const s of my()){
     const st=it.sites[s];if(!st)continue;
-    const word={ok:'Ready',warn:'Ready, with a note',fix:'Needs a fix',skip:'Not sending'}[st.status];
-    const toggle=st.status=='skip'?`<button class="small" onclick="act(${jattr([f])},'${s}','*','include')">Send anyway</button>`
+    const word={ok:'Ready',warn:'Ready, with a note',fix:'Needs a fix',skip:'Not sending',sent:'Sent'}[st.status];
+    const toggle=st.status=='sent'?'':st.status=='skip'?`<button class="small" onclick="act(${jattr([f])},'${s}','*','include')">Send anyway</button>`
       :`<button class="small" onclick="act(${jattr([f])},'${s}','*','skip')">Don’t send</button>`;
     h+=`<h4><span class="chip ${st.status}">${esc(SITES[s].short)}</span>${esc(lab(s))} — ${word} ${toggle}</h4>`;
     if(!st.issues.length)h+='<div class="hint">Nothing to change.</div>';
     for(const i of st.issues){
       let a='';
-      if(i.fix&&!i.applied&&!i.needs_pillow)a=`<button class="small primary" onclick="act(${jattr([f])},'${s}','${i.fix}','apply')">${esc(FIXES[i.fix])}</button>`;
+      if(i.fix&&!i.applied&&!i.needs_pillow&&!i.locked)a=`<button class="small primary" onclick="act(${jattr([f])},'${s}','${i.fix}','apply')">${esc(FIXES[i.fix])}</button>`;
       if(i.applied)a=`<button class="small" onclick="act(${jattr([f])},'${s}','${i.fix}','unapply')">Undo</button>`;
       h+=issueRow(i,a);
     }
@@ -1843,24 +2467,24 @@ function generic(t){  // one line that is true for every photo in a group
 }
 function openChecks(keep,keepScroll){
   if(keep&&$('panel').style.display=='none')return;
-  let h='<h3>Check photos</h3><div class="hint">What each site would reject or change, and what StockUp can fix. Your original photos are never changed; fixes make copies just for that site.</div>';
+  let h='<h3>Check photos</h3><div class="hint">What each site would reject or change, and what StockUp can fix. Your original photos are never changed. '+(opts.photo_mode=='adjusted'?'Fixes that change the picture make copies just for that site.':'You’ve chosen to upload exact files only, so fixes that would change the picture are switched off.')+'</div>';
   let anyFix=false;
   for(const s of my()){
-    const st={ok:0,warn:0,fix:0,skip:0},groups={};
+    const st={ok:0,warn:0,fix:0,skip:0,sent:0},groups={};
     for(const it of items){const x=it.sites[s];if(!x)continue;st[x.status]++;
-      if(x.user_skipped)continue;
+      if(x.user_skipped||x.status=='sent')continue;
       for(const i of x.issues){if(i.level=='info')continue;
         const k=(i.applied?'done:':'')+(i.fix||i.level)+'|'+i.text.replace(/[\d.]+|“.*”/g,'#').slice(0,60);
         (groups[k]=groups[k]||{i,files:[]}).files.push(it.file);}}
     const tot=st.ok+st.warn+st.fix+st.skip;
-    h+=`<h4><span class="chip ${st.fix?'fix':st.skip?'skip':st.warn?'warn':'ok'}">${esc(SITES[s].short)}</span>${esc(lab(s))} — ${st.ok+st.warn} ready${st.fix?`, ${st.fix} need a fix`:''}${st.skip?`, ${st.skip} not sending`:''}</h4>`;
+    h+=`<h4><span class="chip ${st.fix?'fix':st.skip?'skip':st.warn?'warn':'ok'}">${esc(SITES[s].short)}</span>${esc(lab(s))} — ${st.ok+st.warn} ready${st.fix?`, ${st.fix} need a fix`:''}${st.skip?`, ${st.skip} not sending`:''}${st.sent?`, ${st.sent} sent`:''}</h4>`;
     const gs=Object.values(groups);
     if(!gs.length){h+='<div class="hint">All good.</div>';continue}
     for(const {i,files} of gs){
       const n=files.length,list=jattr(files);
       const text=n>1?`${n} photos: ${generic(i.text)}`:`${files[0]}: ${i.text}`;
       let a='';
-      if(i.fix&&!i.applied&&!i.needs_pillow){anyFix=true;a=`<button class="small primary" onclick="act(${list},'${s}','${i.fix}','apply')">${esc(FIXES[i.fix])}${n>1?' ('+n+')':''}</button>`}
+      if(i.fix&&!i.applied&&!i.needs_pillow&&!i.locked){anyFix=true;a=`<button class="small primary" onclick="act(${list},'${s}','${i.fix}','apply')">${esc(FIXES[i.fix])}${n>1?' ('+n+')':''}</button>`}
       else if(i.applied)a=`<button class="small" onclick="act(${list},'${s}','${i.fix}','unapply')">Undo</button>`;
       if(i.level=='block')a+=`<button class="small" onclick="act(${list},'${s}','*','include')">Send anyway</button>`;
       if(i.level=='warn'&&/Adobe only accepts/.test(i.text))a+=`<button class="small" onclick="act(${list},'${s}','*','skip')">Don’t send to Adobe</button>`;
@@ -1875,8 +2499,37 @@ function openChecks(keep,keepScroll){
 /* settings */
 function openSettings(){
   const o=opts;
+  const adj=o.photo_mode=='adjusted';
   panel(`<h3>Settings</h3>
-  <div class="hint">Sites I sell on</div>
+  <div class="hint">Your photo files</div>
+  <label class="row"><input type="radio" name="pm" value="untouched" ${!adj?'checked':''} onchange="pmChanged()">
+    <span><b>Upload my exact files</b> (recommended). Every site gets your originals byte for byte. Fixes that would change the picture are switched off.</span></label>
+  <label class="row"><input type="radio" name="pm" value="adjusted" ${adj?'checked':''} onchange="pmChanged()">
+    <span><b>Let StockUp make adjusted copies</b> when you ask: sRGB, smaller files, baseline JPEGs, and resizing below. Copies go in stockup_output; your originals are never changed.</span></label>
+  <div id="rs" style="margin:4px 0 0 24px;${adj?'':'opacity:.5'}">
+    <label class="row"><span style="min-width:150px">Resize for upload</span>
+      <select id="o_rmode" ${adj?'':'disabled'}>
+        <option value="off" ${o.resize_mode=='off'?'selected':''}>Don’t resize</option>
+        <option value="long_side" ${o.resize_mode=='long_side'?'selected':''}>Longest side, in pixels</option>
+        <option value="megapixels" ${o.resize_mode=='megapixels'?'selected':''}>Megapixels</option>
+      </select>
+      <input id="o_rval" style="width:90px" inputmode="decimal" value="${esc(o.resize_value)}" placeholder="e.g. 6000" ${adj?'':'disabled'}></label>
+    <div class="hint">Only makes photos smaller, never bigger, and never below a site’s minimum. Your originals stay full size.</div>
+  </div>
+  <label class="row"><input type="checkbox" id="o_gps" ${o.strip_gps?'checked':''}>
+    <span><b>Remove GPS location</b> from what’s uploaded. Only the location is blanked out; the picture itself isn’t changed or re-saved.</span></label>
+  <div class="hint" style="margin-top:12px">Uploading</div>
+  <label class="row"><input type="checkbox" id="o_skip" ${o.skip_sent?'checked':''}>
+    <span>Skip photos I’ve already sent to a site (recognised even if renamed)</span></label>
+  <label class="row"><input type="checkbox" id="o_enc" ${o.encrypted_only?'checked':''}>
+    <span>Only upload over encrypted connections. Sites that can’t do this are skipped. (StockUp always tries encryption first.)</span></label>
+  <label class="row"><span style="min-width:150px">Upload order</span>
+    <select id="o_order"><option value="spread" ${o.upload_order=='spread'?'selected':''}>Shuffled, look-alikes kept apart</option>
+    <option value="folder" ${o.upload_order=='folder'?'selected':''}>Same order as the folder</option></select></label>
+  <label class="row"><span style="min-width:150px">Sites</span>
+    <select id="o_pace"><option value="together" ${o.upload_pacing=='together'?'selected':''}>All at once</option>
+    <option value="one_by_one" ${o.upload_pacing=='one_by_one'?'selected':''}>One site at a time</option></select></label>
+  <div class="hint" style="margin-top:12px">Sites I sell on</div>
   <div style="display:flex;flex-wrap:wrap;gap:10px;margin:6px 0">${Object.keys(SITES).map(s=>`<label class="row" style="margin:0"><input type="checkbox" class="mysite" value="${s}" ${my().includes(s)?'checked':''}><span>${esc(lab(s))}</span></label>`).join('')}</div>
   <div class="hint" style="margin-top:12px">Titles and captions</div>
   <label class="row"><input type="radio" name="cm" value="auto" ${o.caption_mode=='auto'?'checked':''}>
@@ -1896,8 +2549,14 @@ function openSettings(){
   <p><button class="primary" onclick="saveSettings()">Save settings</button></p>
   <div class="hint">Version ${esc(VERSION)} · <button class="link" onclick="checkUpdate(true)">Check for updates</button></div>`);
 }
+function pmChanged(){const adj=document.querySelector('input[name=pm]:checked').value=='adjusted';
+  $('rs').style.opacity=adj?1:.5;$('o_rmode').disabled=!adj;$('o_rval').disabled=!adj}
 async function saveSettings(){
-  const o={caption_mode:document.querySelector('input[name=cm]:checked').value,adobe_strip_commas:$('o_commas').checked,
+  const rv=$('o_rval').value.trim();
+  if($('o_rmode').value!='off'&&!(parseFloat(rv)>0))return note('Type a size for “Resize for upload”, or choose “Don’t resize”.');
+  const o={photo_mode:document.querySelector('input[name=pm]:checked').value,resize_mode:$('o_rmode').value,resize_value:rv,
+    strip_gps:$('o_gps').checked,skip_sent:$('o_skip').checked,encrypted_only:$('o_enc').checked,
+    upload_order:$('o_order').value,upload_pacing:$('o_pace').value,caption_mode:document.querySelector('input[name=cm]:checked').value,adobe_strip_commas:$('o_commas').checked,
     flag_formatted:$('o_fmt').checked,editorial_keyword:$('o_kw').value,drop_marker_keyword:$('o_drop').checked,editorial_label:$('o_lab').value,
     my_sites:[...document.querySelectorAll('.mysite:checked')].map(i=>i.value)};
   try{const r=await api('/api/options',o);await load();await loadSites();
@@ -1947,38 +2606,80 @@ async function buildStatus(){
   if(b.error)return panel('<h3>Couldn’t make the files</h3><p class="err">'+esc(b.error)+'</p>');
   const r=b.result;if(!r)return;
   note(`Files ready · ${counts()}`);
-  panel(`<h3>Files ready</h3><div class="hint">Saved in ${esc(r.folder)}</div>`+r.sites.map(s=>`<h4>${esc(s.label)}</h4>
+  const orig=r.changed_originals.length?`<p class="err">These originals changed while StockUp was open (StockUp never writes to them, so another app did): ${esc(r.changed_originals.join(', '))}</p>`
+    :`<p class="ok">✓ Your originals are unchanged.${r.mode=='adjusted'?'':' Every site gets your exact files.'}</p>`;
+  panel(`<h3>Files ready</h3><div class="hint">Saved in ${esc(r.folder)}</div>${orig}`+r.sites.map(s=>`<h4>${esc(s.label)}</h4>
     <div>${s.included} photos${s.skipped?`, ${s.skipped} not sent`:''}${s.problems?` · <span class="err">${s.problems} note${s.problems>1?'s':''} in checks.txt</span>`:''}</div>
-    <div class="hint">${esc(s.files.join(' · '))}</div><div class="hint">Next: ${esc(s.next)}</div>`).join(''));
+    <div class="hint">${esc(s.files.join(' · '))}</div><div class="hint">Next: ${esc(s.next)}</div>
+    ${s.site=='dreamstime'?'<p><button class="small primary" onclick="sendSheet(\'dreamstime\')">Send spreadsheet to Dreamstime</button></p>':''}`).join(''));
+}
+async function sendSheet(site){
+  if(!confirm('Send the spreadsheet now? Dreamstime only applies it to photos that already show up in its Unfinished section.'))return;
+  try{const r=await api('/api/send_sheet',{site});note(r.message)}catch(e){note(e.message)}
 }
 async function testSites(){
   panel('<h3>Checking logins…</h3>');
   try{const r=await api('/api/test',{});
     panel('<h3>Logins</h3>'+r.map(s=>`<div class="site"><b>${esc(s.label)}</b>
-      <div class="${s.result=='OK'?'':'err'}">${s.result=='OK'?'Connected':esc(s.result)}</div>${s.listing?`<div class="hint">On the server: ${esc(s.listing.join(', ')||'(empty)')}</div>`:''}</div>`).join(''));}
+      <div class="${s.result=='OK'?'':'err'}">${s.result=='OK'?`Connected · <span class="lock ${s.encrypted?'':'no'}">${s.encrypted?'encrypted':'not encrypted (the site doesn’t offer it)'}</span>`:esc(s.result)}</div>${s.listing?`<div class="hint">On the server: ${esc(s.listing.join(', ')||'(empty)')}</div>`:''}</div>`).join(''));}
   catch(e){panel('<h3>Logins</h3><p class="err">'+esc(e.message)+'</p>')}
 }
-let poll=null;
+let poll=null,dockHidden=false;
 async function upload(){
   const pick=sites.filter(s=>s.checked).map(s=>s.name);
   if(!pick.length)return panel('<h3>Pick a site</h3><p>Tick at least one site next to “Send to”. A site is greyed out until you add its login under Logins.</p>');
   await save();
+  let pv;try{pv=await api('/api/preview',{sites:pick})}catch(e){return note(e.message)}
+  const total=pv.sites.reduce((a,s)=>a+s.send,0);
+  panel(`<h3>Ready to upload</h3>
+    <div class="hint">Nothing has been sent yet. Check this, then press Start.</div>
+    <table class="pv"><tr><th>Site</th><th>Sending</th><th>Not sending</th><th>Connection</th></tr>`+
+    pv.sites.map(s=>`<tr><td><b>${esc(s.label)}</b><div class="hint">${esc(s.host)}</div></td>
+      <td>${s.send} photos · ${s.mb} MB${s.editorial?`<div class="hint">${s.editorial} editorial</div>`:''}${s.copies?`<div class="hint">${s.copies} as adjusted copies</div>`:''}${s.renamed?`<div class="hint">${s.renamed} with a safer name</div>`:''}</td>
+      <td>${s.not_sending||'–'}${s.already?`<div class="hint">${s.already} already sent</div>`:''}</td>
+      <td class="hint">${esc(s.connection)}</td></tr>`).join('')+`</table>
+    <div class="hint">${pv.mode=='adjusted'?'Adjusted copies are allowed (only where you applied a fix or set a resize).':'Exact files: every photo goes up exactly as it is on your computer.'}
+      ${pv.strip_gps?' GPS locations are left out.':''} Order: ${pv.order=='spread'?'shuffled, look-alikes kept apart':'same as the folder'}. ${pv.pacing=='one_by_one'?'One site at a time.':'All sites at once.'}
+      Files already on a site’s server are never overwritten.</div>
+    <p><button class="primary" ${total?'':'disabled'} onclick="startUpload(${jattr(pick)})">Start upload${total?` (${total})`:''}</button></p>`);
+}
+async function startUpload(pick){
   try{const j=await api('/api/upload',{sites:pick});
     if(!j.started)return panel('<h3>Nothing to upload</h3><p>'+esc(j.reason)+'</p>');
-    clearInterval(poll);poll=setInterval(status,1000);status();}
+    closePanel();dockHidden=false;clearInterval(poll);poll=setInterval(status,1000);status();}
   catch(e){note(e.message)}
 }
 const mb=b=>(b/1048576).toFixed(0)+' MB';
+let lastStatus=null;
 async function status(){
   let s;try{s=await api('/api/status')}catch(e){return}
-  panel('<h3>'+(s.running?'Uploading…':'Upload finished')+'</h3>'+Object.entries(s.sites).map(([n,p])=>{
-    const pct=p.total_bytes?Math.min(100,100*p.bytes/p.total_bytes):0;
-    return `<div class="site"><b>${esc(lab(n))}</b> — ${esc(p.state)} · ${p.done} of ${p.total} photos · ${mb(p.bytes)} of ${mb(p.total_bytes)}
+  lastStatus=s;
+  const d=$('dock');
+  if(!Object.keys(s.sites).length||dockHidden){d.style.display='none'}
+  else{
+    d.style.display='flex';
+    d.innerHTML=Object.entries(s.sites).map(([n,p])=>{
+      const pct=p.total_bytes?Math.min(100,100*p.bytes/p.total_bytes):0;
+      const fin=/finished|stopped|error/.test(p.state);
+      const cls=p.state=='error'||p.errors.length?'bad':(fin?'done':'');
+      const word={waiting:'Waiting its turn',connecting:'Connecting…',uploading:'Uploading',finished:'Done','finished with errors':'Done, with problems',stopped:'Stopped',error:'Stopped by a problem'}[p.state]||p.state;
+      return `<div class="pcard ${cls}"><div class="row1"><b>${esc(lab(n))}</b><span>${Math.round(pct)}%</span></div>
+        <div class="prog big"><i style="width:${pct}%"></i></div>
+        <div class="row1 hint"><span>${esc(word)} · ${p.done} of ${p.total}</span>${p.encrypted===null?'':`<span class="lock ${p.encrypted?'':'no'}">${p.encrypted?'encrypted':'not encrypted'}</span>`}</div>
+        ${p.current&&!fin?`<div class="hint">${esc(p.current)}</div>`:''}${p.errors.length?`<div class="err">${p.errors.length} problem${p.errors.length>1?'s':''}</div>`:''}</div>`}).join('')+
+      `<div class="dockbar">${s.running?`<button class="small" ${s.stopping?'disabled':''} onclick="stopUpload()">${s.stopping?'Stopping after this photo…':'Stop'}</button>`:''}
+        <button class="small" onclick="uploadDetails()">Details</button>${s.running?'':'<button class="small" onclick="hideDock()">Close</button>'}</div>`;
+  }
+  if(!s.running){clearInterval(poll);if(Object.keys(s.sites).length){note('Upload finished.');load()}}
+}
+function hideDock(){dockHidden=true;$('dock').style.display='none'}
+async function stopUpload(){try{await api('/api/stop',{});status()}catch(e){note(e.message)}}
+function uploadDetails(){
+  const s=lastStatus;if(!s)return;
+  panel('<h3>'+(s.running?'Uploading…':'Upload finished')+'</h3>'+Object.entries(s.sites).map(([n,p])=>`<div class="site"><b>${esc(lab(n))}</b> — ${p.done} of ${p.total} photos · ${mb(p.bytes)} of ${mb(p.total_bytes)}
       ${p.skipped?`<span class="hint">(${p.skipped} sent earlier)</span>`:''}${p.left_out?`<span class="hint"> · ${p.left_out} not for this site</span>`:''}
-      <div class="prog"><i style="width:${pct}%"></i></div>${p.current?`<div class="hint">${esc(p.current)}</div>`:''}
-      ${p.errors.map(e=>`<div class="err">${esc(e)}</div>`).join('')}</div>`}).join('')+
-    (s.running?'':'<p class="hint">Next: click “Make site files” for each site’s spreadsheet and what’s left to do on its website. Something failed? Press Upload again — photos already sent are skipped.</p>'));
-  if(!s.running)clearInterval(poll);
+      ${p.notes.map(e=>`<div class="hint">${esc(e)}</div>`).join('')}${p.errors.map(e=>`<div class="err">${esc(e)}</div>`).join('')}</div>`).join('')+
+    '<p class="hint">Every upload is listed in stockup_output/upload_receipt.csv. Something failed? Press Upload again — photos already sent are skipped.</p>');
 }
 
 /* updates */
@@ -2022,7 +2723,8 @@ async function load(){
 }
 window.addEventListener('beforeunload',()=>{if(dirty)save()});
 setInterval(()=>fetch('/api/ping').catch(()=>{}),20000);
-(async()=>{fill();try{await load();note('Ready · '+counts());await loadSites();checkUpdate(false)}catch(e){note(e.message)}})();
+(async()=>{fill();try{await load();note('Ready · '+counts());await loadSites();checkUpdate(false);
+  const st=await api('/api/status');if(st.running){poll=setInterval(status,1000);status()}}catch(e){note(e.message)}})();
 </script></body></html>"""
 
 
@@ -2077,7 +2779,18 @@ def make_handler(app):
             raw = self.rfile.read(n) if n else b""
             return json.loads(raw) if raw.strip() else {}
 
+        def _host_ok(self):
+            # Only StockUp's own page may talk to StockUp: blocks other websites, including
+            # tricks that point a web address at your computer.
+            port = self.server.server_address[1]
+            if self.headers.get("Host", "") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+                self._send(403, {"error": "forbidden"})
+                return False
+            return True
+
         def _same_origin(self):
+            if not self._host_ok():
+                return False
             origin = self.headers.get("Origin")
             if origin and urlparse(origin).netloc != self.headers.get("Host", ""):
                 self._send(403, {"error": "forbidden"})
@@ -2085,6 +2798,8 @@ def make_handler(app):
             return True
 
         def do_GET(self):
+            if not self._host_ok():
+                return
             u = urlparse(self.path)
             p = u.path
             app.last_ping = time.time()
@@ -2095,7 +2810,8 @@ def make_handler(app):
                         .replace("__SITES__", json.dumps({k: {"label": v["label"], "short": v["short"],
                                                               "ftp": bool(v["ftp"])}
                                                           for k, v in SITES.items()})) \
-                        .replace("__FIXES__", json.dumps(FIXES))
+                        .replace("__FIXES__", json.dumps(FIXES)) \
+                        .replace("__DT__", json.dumps(DREAMSTIME_CATEGORIES))
                     return self._send(200, page, "text/html; charset=utf-8")
                 if p == "/api/items":
                     return self._send(200, {"folder": batch.folder, "items": batch.items(),
@@ -2154,6 +2870,15 @@ def make_handler(app):
                     return self._send(200, {"started": True})
                 if p == "/api/test":
                     return self._send(200, test_sites())
+                if p == "/api/preview":
+                    ready = [s["name"] for s in sites_summary() if s["ready"]]
+                    return self._send(200, upload_preview(
+                        batch, [n for n in body.get("sites", []) if n in ready]))
+                if p == "/api/stop":
+                    app.uploader.stop()
+                    return self._send(200, {"ok": True})
+                if p == "/api/send_sheet":
+                    return self._send(200, send_sheet(batch, body.get("site", "")))
                 if p == "/api/upload":
                     if app.uploader.running:
                         return self._send(200, {"started": True})
@@ -2226,6 +2951,21 @@ def self_test(out_path):
             lines.append(f"{mod}: ok")
         except Exception as e:
             lines.append(f"{mod}: FAILED {e}")
+    try:
+        from PIL import Image
+        tmp = os.path.join(CONF_DIR, "_selftest_gps.jpg")
+        ex = Image.Exif()
+        ex[0x8825] = {1: "N", 2: (40.0, 44.0, 54.0), 3: "W", 4: (73.0, 59.0, 10.0)}
+        Image.new("RGB", (64, 64), (10, 20, 30)).save(tmp, exif=ex.tobytes())
+        raw = open(tmp, "rb").read()
+        clean = strip_gps_bytes(raw)
+        with open(tmp, "wb") as fh:
+            fh.write(clean)
+        ok = len(clean) == len(raw) and not read_photo(tmp)[0]["info"]["gps"]
+        lines.append(f"gps: {'ok' if ok else 'FAILED still there'}")
+        os.remove(tmp)
+    except Exception as e:
+        lines.append(f"gps: FAILED {e}")
     try:
         from PIL import Image, ImageCms
         tmp = os.path.join(CONF_DIR, "_selftest.jpg")
