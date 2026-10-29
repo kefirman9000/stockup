@@ -1,11 +1,6 @@
-**New: apps for Mac and Windows.** No Python needed. Download `StockUp-Mac.zip` (Apple silicon) or `StockUp-Windows.zip` below. The [README](https://github.com/kefirman9000/stockup#download) explains opening it the first time.
+**Dreamstime update**
+- Matches Dreamstime's own upload rules: 3 MP minimum, files up to 1 GB, and no 70 MP cap.
+- **New check:** StockUp estimates how strongly each JPEG was compressed and adds a note for Dreamstime when a photo was saved below about 90% quality, since Dreamstime asks for best-quality compression.
+- Clearer Dreamstime login help: the username is the user ID number shown on Dreamstime's FTP page.
 
-**What's new in 1.2**
-- **Checks every photo for every site,** with a badge per site: size, file size, color profile, keyword count, title and description length, and file names.
-- **One-click fixes,** per photo or for the whole batch. StockUp can shorten titles and descriptions, give files safe names, and make sRGB, smaller, resized or baseline copies. Your originals are never changed.
-- **Skips photos a site won't accept,** with **Send anyway** to override.
-- **Three more agencies:** Depositphotos, 123RF and Pond5. Pick the sites you sell on in Settings.
-- **Passwords in your keychain:** Keychain on Mac, Credential Manager on Windows. Add them under the new **Logins** panel.
-- **Another batch** and **Quit** buttons.
-
-Running the script instead? Download `stockup.py` below, or press **Update now** in StockUp.
+**Downloads:** `StockUp-Mac.zip` (Apple silicon), `StockUp-Windows.zip`, or `stockup.py`. If you already use the script, press **Update now** in StockUp. Using the app? Download the new zip, then quit the old app and open the new one.

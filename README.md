@@ -81,7 +81,7 @@ Everything is saved in a `stockup_output` folder inside your batch folder, with 
 |---|---|---|---|---|---|
 | Shutterstock | 4 MP | 50 MB | sRGB | 7–50 | Description up to 200 characters, at least 5 words |
 | Adobe Stock | 4 MP (100 MP max) | 45 MB | sRGB | 5–49 | Title up to 70 characters, file name up to 30 |
-| Dreamstime | 3 MP (70 MP max) | | | | |
+| Dreamstime | 3 MP | 1 GB | RGB | | Best-quality JPEG (flags photos saved below about 90%) |
 | Alamy | 17 MB when opened (about 6 MP) | | | | Standard (baseline) JPEG |
 | iStock | | 50 MB | | | |
 | Depositphotos | 3.8 MP | 50 MB | | 8–50 | Description up to 250 characters |
