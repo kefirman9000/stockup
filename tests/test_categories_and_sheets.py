@@ -64,6 +64,9 @@ def test_spreadsheets_for_each_site(stockup, batch_dir):
     assert ss["news.jpg"]["Editorial"] == "Yes" and ss["calm.jpg"]["Editorial"] == "No"
     assert ss["news.jpg"]["Description"].startswith("CAMDEN, MAINE - JULY 4, 2026: ")
     assert ss["calm.jpg"]["Categories"]
+    with open(f"{out}/shutterstock/shutterstock.csv", encoding="utf-8") as fh:
+        assert fh.readline().strip() == ("Filename,Description,Keywords,Categories,Illustration,"
+                                         "Mature Content,Editorial")  # Shutterstock's sample, exactly
     adobe_csv = next(s for s in r["sites"] if s["site"] == "adobe")["files"][0]
     ad = {row["Filename"]: row for row in read(f"{out}/adobe/{adobe_csv}")}
     assert "," not in ad["news.jpg"]["Title"]
@@ -99,3 +102,37 @@ def test_shuffled_order_without_picture_hashes_splits_series(stockup):
     order = stockup.spread_order(files, {}, "z")
     nums = [int(f[4:8]) for f in order]
     assert sum(1 for a, b in zip(nums, nums[1:]) if abs(a - b) <= 3) <= 1
+
+
+def test_site_steps_track_each_photos_spreadsheet(stockup, batch_dir):
+    """Sites only take categories and the editorial setting from their spreadsheet, applied on
+    the site after the photos arrive. StockUp shows, per photo, whether that's been done."""
+    import json
+    for i, n in enumerate(("a.jpg", "b.jpg", "c.jpg")):
+        make_photo(batch_dir, n, seed=i)
+    stockup.save_options({"my_sites": ["shutterstock", "dreamstime", "alamy"]})
+    with open(os.path.join(batch_dir, stockup.UPLOAD_LOG_NAME), "w") as fh:
+        json.dump({"shutterstock": ["a.jpg", "b.jpg"], "alamy": ["a.jpg"]}, fh)  # c not sent yet
+    b = stockup.Batch(batch_dir)
+    b.save({"a.jpg": dict(b.state["a.jpg"], ss_cats=["Nature"], editorial=True)})
+    steps = {it["file"]: it["steps"] for it in b.items()}
+    assert steps == {"a.jpg": {"shutterstock": "waiting"}, "b.jpg": {"shutterstock": "waiting"},
+                     "c.jpg": {}}  # Alamy reads the files themselves: no step
+
+    over = stockup.finish_overview(b)
+    assert [s["site"] for s in over] == ["shutterstock"] and over[0]["waiting"] == 2
+    assert "2 photos" in over[0]["steps"][0]
+    rows = {r["Filename"]: r for r in read(over[0]["file"])}
+    assert set(rows) == {"a.jpg", "b.jpg"}  # only photos already on Shutterstock
+    assert rows["a.jpg"]["Categories"] == "Nature" and rows["a.jpg"]["Editorial"] == "Yes"
+
+    stockup.finish_done(b, "shutterstock")
+    assert stockup.Batch(batch_dir).sheet_status("a.jpg", "shutterstock") == "applied"  # remembered
+    assert stockup.finish_overview(b)[0]["applied"] == 2 and not stockup.finish_overview(b)[0]["file"]
+
+    b.state["a.jpg"]["ss_cats"] = ["Nature", "Transportation"]  # changed afterwards
+    assert b.sheet_status("a.jpg", "shutterstock") == "changed"
+    b.state["a.jpg"]["adobe_cat"] = 3  # Shutterstock's sheet doesn't carry Adobe's category
+    assert b.sheet_status("b.jpg", "shutterstock") == "applied"
+    again = stockup.finish_overview(b)[0]
+    assert again["changed"] == 1 and [r["Filename"] for r in read(again["file"])] == ["a.jpg"]

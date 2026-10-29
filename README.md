@@ -97,16 +97,20 @@ StockUp's window uses the page engine built into your computer: Safari's on a Ma
 3. Pick photos and click **Editorial** or **Creative**. Check the categories StockUp picked (change any you like), and add the place and date for editorial shots.
 4. Open **Check photos** and apply the fixes you want.
 5. Click **Make site files**, tick the sites next to **Send to**, and click **Upload**.
-6. Finish on each website. **Make site files** shows the next step for every site:
+6. Finish on each website with **Site steps**. It opens by itself when an upload ends.
+
+**Why this step matters:** sites don't read categories, and most don't read the editorial setting, from photos sent by FTP. They only take them from their spreadsheet, applied on the site after the photos have arrived there. **Site steps** makes a spreadsheet with just the photos you've uploaded, shows it to you, and walks you through each site. Once you've applied it, press **I've applied it**. Every photo then shows where it stands: **SS ✓ applied**, **spreadsheet not applied**, or **changed since applied** if you edit it afterwards. StockUp can't look inside your site accounts, so this record comes from you. The filter **Show ones waiting on a site step** lists what's left.
+
+| Site | What's left to do |
 
 | Site | What's left to do |
 |---|---|
-| Shutterstock | On the Submit page, click **CSV** and choose `shutterstock.csv`. This sets descriptions, keywords, categories and the editorial flag. |
+| Shutterstock | Wait until the photos show up on the Submit page, which can take a few minutes after the upload. Then click **CSV** there and choose the spreadsheet **Site steps** shows you. This is the only way Shutterstock gets your categories and the editorial flag. |
 | Adobe Stock | Under *Uploaded Files › New*, click **Upload CSV**. Tick editorial for the files in `editorial_list.txt`. |
 | Depositphotos | Upload `depositphotos.csv`. This sets the editorial flag too. |
 | 123RF | Upload `123rf.csv`. Tick editorial for the files in `editorial_list.txt`. |
 | Pond5 | *Uploads › Apply CSV › pond5.csv*. Pond5 only documents its video spreadsheet, so check your first batch. |
-| Dreamstime | When the photos show up in Dreamstime's *Unfinished* section, click **Send spreadsheet to Dreamstime** in StockUp. It fills in titles, keywords, categories and the editorial flag. |
+| Dreamstime | When the photos show up in Dreamstime's *Unfinished* section, press **Send spreadsheet** in **Site steps**. It fills in titles, keywords, categories and the editorial flag. |
 | Alamy | Alamy reads your titles and keywords from the photos. Tick "Sell for editorial only" for the files in `editorial_list.txt`. |
 | iStock | No upload from StockUp. Drag the `creative` folder into a Creative batch and `editorial` into an Editorial batch. |
 
