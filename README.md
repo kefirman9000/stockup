@@ -188,3 +188,16 @@ python stockup.py update                                        install the newe
 ## Support StockUp
 
 StockUp is free. If it saves you hours of re-typing titles and keywords, you can support its development on **[GitHub Sponsors](https://github.com/sponsors/kefirman9000)**. It helps keep new agencies and fixes coming. Starring the repo and reporting problems help too.
+
+## License and disclaimer
+
+Copyright © 2026 kefirman9000. All rights reserved. StockUp is free to use; see [LICENSE](LICENSE) for what is and isn't allowed.
+
+- Each stock agency has its own terms of service. Automated or bulk uploading may not be allowed on every site, so check each agency's rules. You are responsible for following them and for what you upload.
+- Only upload images you own or have the rights and releases for.
+
+StockUp is provided **as is**, without warranty of any kind. Use it at your own risk; the author is not liable for any damage, data loss or other loss arising from its use.
+
+StockUp is an independent project and is not affiliated with, endorsed by or sponsored by any of the companies or products named here. Shutterstock, Adobe Stock, Dreamstime, Alamy, iStock, Depositphotos, 123RF and Pond5 are trademarks of their respective owners. Adobe, Lightroom, Bridge and Photoshop are trademarks of Adobe Inc. Photo Mechanic is a trademark of Camera Bits, Inc.
+
+Found a security problem? Please report it privately; see [SECURITY.md](SECURITY.md).
