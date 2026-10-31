@@ -184,3 +184,7 @@ python stockup.py upload "My Batch" --sites shutterstock,alamy   upload without 
 python stockup.py test                                          check your logins
 python stockup.py update                                        install the newest version
 ```
+
+## Support StockUp
+
+StockUp is free. If it saves you hours of re-typing titles and keywords, you can support its development on **[GitHub Sponsors](https://github.com/sponsors/kefirman9000)**. It helps keep new agencies and fixes coming. Starring the repo and reporting problems help too.
