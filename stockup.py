@@ -42,7 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 STARTED = time.time()
@@ -74,6 +74,7 @@ OUT_NAME = "stockup_output"
 UPLOAD_LOG_NAME = ".stockup_uploaded.json"
 APPLIED_NAME = ".stockup_applied.json"  # which photos' site spreadsheets you've applied
 HISTORY_PATH = os.path.join(CONF_DIR, "upload_history.json")
+RESULTS_NAME = "site_results.json"   # rejections and sales imported from site reports (in CONF_DIR)
 IMAGE_EXT = (".jpg", ".jpeg")
 KEYRING_SERVICE = "StockUp"
 
@@ -905,6 +906,57 @@ def suggest_categories(title, keywords, editorial=False, description=""):
 # Fingerprints: to protect originals and to spot photos you've sent before
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Model and property releases. Creative (non-editorial) photos of recognisable people need a
+# model release, and recognisable private property (homes, interiors, artwork, pets...) often
+# needs a property release. StockUp can't see faces, so it goes by the title and keywords.
+# --------------------------------------------------------------------------
+
+MODEL_WORDS = {
+    "people", "person", "persons", "man", "men", "woman", "women", "boy", "boys", "girl", "girls",
+    "child", "children", "kid", "kids", "baby", "babies", "toddler", "teen", "teenager", "adult",
+    "portrait", "selfie", "face", "faces", "couple", "family", "mother", "father", "mom", "dad",
+    "parent", "parents", "son", "daughter", "grandmother", "grandfather", "senior", "elderly",
+    "businessman", "businesswoman", "worker", "workers", "student", "students", "model", "bride",
+    "groom", "friends", "crowd", "athlete", "player", "dancer", "musician", "doctor", "nurse",
+    "chef", "tourist", "tourists", "lady", "gentleman", "guy", "smiling", "smile", "headshot",
+}
+PROPERTY_WORDS = {   # only what sites usually ask a property release for (not every car, boat or shop)
+    "house interior", "home interior", "interior", "living room", "bedroom", "kitchen", "bathroom",
+    "apartment", "private property", "private home", "artwork", "painting", "mural", "sculpture",
+    "tattoo", "logo", "trademark",
+}
+RELEASE_SITES_COLUMN = {"adobe": "Releases", "depositphotos": "Releases"}   # sheets with a releases column
+
+
+def _words_in(text):
+    t = " " + re.sub(r"[^a-z0-9]+", " ", (text or "").lower()) + " "
+    return t
+
+
+def release_needs(meta):
+    """{"model": [words that suggest people], "property": [words that suggest private property]}."""
+    hay = _words_in(" ".join([meta.get("title", ""), meta.get("description", "")] + list(meta.get("keywords", []))))
+    found = {"model": [], "property": []}
+    for kind, words in (("model", MODEL_WORDS), ("property", PROPERTY_WORDS)):
+        for w in sorted(words):
+            if f" {w} " in hay:
+                found[kind].append(w)
+    return found
+
+
+def clean_releases(value):
+    """Release names as typed: 'Jane MR, House PR' -> ['Jane MR', 'House PR'] (no duplicates, at most 10)."""
+    if isinstance(value, str):
+        value = value.split(",")
+    out = []
+    for v in value or []:
+        v = " ".join(str(v).replace(",", " ").split())[:80]
+        if v and v.lower() not in (x.lower() for x in out):
+            out.append(v)
+    return out[:10]
+
+
 def file_sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -960,6 +1012,254 @@ def record_history(site, folder, f, sha, look):
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(h, fh)
         os.replace(tmp, HISTORY_PATH)
+
+
+# --------------------------------------------------------------------------
+# Results: import the reports the sites let you download (accepted / rejected / sales) and see
+# what works where. Columns are found by their names, so most sites' CSV exports work.
+# --------------------------------------------------------------------------
+
+REPORT_COLUMNS = {
+    "file": ("original filename", "original file name", "filename", "file name", "file", "media name",
+             "image name", "original name", "name"),
+    "status": ("status", "review status", "state", "result", "decision", "moderation"),
+    "reason": ("rejection reason", "reasons", "reason", "rejection", "reviewer comment", "comments",
+               "comment", "note", "notes"),
+    "earn": ("earnings", "your earnings", "revenue", "royalty", "royalties", "commission", "amount",
+             "income", "earned", "payout", "usd"),
+    "sales": ("downloads", "sales", "licenses", "licences", "times sold", "count", "quantity"),
+    "id": ("media id", "asset id", "image id", "content id", "id"),
+}
+ACCEPTED_WORDS = ("accept", "approv", "online", "active", "publish", "live", "ok")
+REJECTED_WORDS = ("reject", "declin", "refus", "denied", "not accepted", "failed")
+
+
+def _find_column(header, kind):
+    names = [h.strip().lower().lstrip("\ufeff") for h in header]
+    for want in REPORT_COLUMNS[kind]:          # exact names first, then names that contain it
+        if want in names:
+            return names.index(want)
+    for want in REPORT_COLUMNS[kind]:
+        for i, n in enumerate(names):
+            if want in n and not (kind == "file" and ("id" == n or "url" in n)):
+                return i
+    return None
+
+
+def _money(text):
+    t = re.sub(r"[^0-9.,\-]", "", str(text or ""))
+    if t.count(",") and t.count("."):
+        t = t.replace(",", "")
+    elif t.count(",") == 1 and len(t.split(",")[1]) <= 2:
+        t = t.replace(",", ".")
+    else:
+        t = t.replace(",", "")
+    try:
+        return float(t)
+    except ValueError:
+        return 0.0
+
+
+def _status_word(text):
+    t = str(text or "").strip().lower()
+    if any(w in t for w in REJECTED_WORDS):
+        return "rejected"
+    if any(w in t for w in ACCEPTED_WORDS):
+        return "accepted"
+    return "pending" if t else ""
+
+
+def guess_site(name, header=()):
+    t = (os.path.basename(name) + " " + " ".join(header)).lower()
+    for site, rules in SITES.items():
+        if site in t.replace(" ", "") or rules["label"].lower().replace(" ", "") in t.replace(" ", ""):
+            return site
+    if "ss_" in t or "submit" in t:
+        return "shutterstock"
+    return None
+
+
+def results_path():
+    return os.path.join(CONF_DIR, RESULTS_NAME)
+
+
+def load_results():
+    try:
+        with open(results_path(), encoding="utf-8") as fh:
+            r = json.load(fh)
+        r.setdefault("sites", {})
+        r.setdefault("imports", {})
+        return r
+    except (OSError, ValueError):
+        return {"sites": {}, "imports": {}}
+
+
+def _sent_index(site):
+    """file name (lowercase, also without extension) -> (batch folder, file), for photos sent to this site."""
+    idx = {}
+    for entry in load_history()["sha"].values():
+        e = entry.get(site)
+        if e:
+            name = e["file"].lower()
+            idx[name] = (e["batch"], e["file"])
+            idx.setdefault(os.path.splitext(name)[0], (e["batch"], e["file"]))
+    return idx
+
+
+def import_report(path, site=None):
+    """Read one site report (CSV) into StockUp's results. Importing the same file twice changes nothing.
+    Returns a summary for the page."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    digest = hashlib.sha256(raw).hexdigest()
+    text = raw.decode("utf-8-sig", "replace")
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+    except csv.Error:
+        dialect = csv.excel
+    rows = list(csv.reader(text.splitlines(), dialect))
+    rows = [r for r in rows if any(c.strip() for c in r)]
+    if len(rows) < 2:
+        raise ValueError("That file has no rows to read.")
+    header = rows[0]
+    site = site if site in SITES else guess_site(path, header)
+    if not site:
+        raise ValueError("Couldn't tell which site this report is from. Choose the site, then import it again.")
+    col = {k: _find_column(header, k) for k in REPORT_COLUMNS}
+    if col["file"] is None:
+        raise ValueError("Couldn't find a file name column in this report. Its columns are: "
+                         + ", ".join(h.strip() for h in header if h.strip()) + ".")
+    if col["status"] is None and col["earn"] is None and col["sales"] is None:
+        raise ValueError("This report has no status, earnings or downloads column, so there's nothing to "
+                         "import. Its columns are: " + ", ".join(h.strip() for h in header if h.strip()) + ".")
+    res = load_results()
+    if digest in res["imports"]:
+        prev = res["imports"][digest]
+        return {"site": site, "label": SITES[site]["label"], "already": True, **prev}
+    sent = _sent_index(site)
+    per = {}
+    for r in rows[1:]:
+        cell = lambda k: r[col[k]].strip() if col[k] is not None and col[k] < len(r) else ""
+        name = os.path.basename(cell("file").replace("\\", "/"))
+        if not name:
+            continue
+        key = name.lower()
+        e = per.setdefault(key, {"name": name, "status": "", "reason": "", "earn": 0.0, "sales": 0})
+        st = _status_word(cell("status"))
+        if st:
+            e["status"] = st
+        if cell("reason") and (st == "rejected" or not st):
+            e["reason"] = cell("reason")[:300]
+        if col["earn"] is not None:
+            e["earn"] += _money(cell("earn"))
+            if col["sales"] is None:
+                e["sales"] += 1                      # one row per sale
+        if col["sales"] is not None:
+            e["sales"] += int(_money(cell("sales")) or 0)
+    store = res["sites"].setdefault(site, {})
+    matched = 0
+    when = datetime.now().strftime("%Y-%m-%d")
+    for key, e in per.items():
+        hit = sent.get(key) or sent.get(os.path.splitext(key)[0])
+        rec = store.setdefault(key, {"name": e["name"], "status": "", "reason": "", "earn": 0.0, "sales": 0,
+                                     "keywords": [], "title": ""})
+        if e["status"]:
+            rec["status"], rec["reason"] = e["status"], e["reason"] or (rec["reason"] if e["status"] == "rejected"
+                                                                        else "")
+        rec["earn"] = round(rec.get("earn", 0.0) + e["earn"], 4)
+        rec["sales"] = rec.get("sales", 0) + e["sales"]
+        rec["updated"] = when
+        if hit:
+            matched += 1
+            rec["batch"], rec["file"] = hit
+            if not rec.get("keywords"):
+                try:
+                    m, _thumb = read_photo(os.path.join(*hit))
+                    rec["keywords"], rec["title"] = m["keywords"][:60], m["title"] or m["description"]
+                except Exception:
+                    pass
+    summary = {"rows": len(rows) - 1, "photos": len(per), "matched": matched, "date": when,
+               "file": os.path.basename(path)}
+    res["imports"][digest] = {**summary, "site": site}
+    tmp = results_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(res, fh)
+    os.replace(tmp, results_path())
+    return {"site": site, "label": SITES[site]["label"], "already": False, **summary}
+
+
+def results_summary(min_photos=3):
+    """Per site: accepted / rejected / earnings, the commonest rejection reasons, and the keywords that do
+    best and worst (keywords on at least min_photos photos)."""
+    res = load_results()
+    out = []
+    for site in SITE_ORDER:
+        recs = list(res["sites"].get(site, {}).values())
+        if not recs:
+            continue
+        acc = sum(1 for r in recs if r.get("status") == "accepted")
+        rej = sum(1 for r in recs if r.get("status") == "rejected")
+        reasons = {}
+        for r in recs:
+            if r.get("status") == "rejected" and r.get("reason"):
+                k = r["reason"].strip().rstrip(".")
+                reasons[k] = reasons.get(k, 0) + 1
+        kw = {}
+        for r in recs:
+            for k in {x.lower() for x in r.get("keywords", [])}:
+                d = kw.setdefault(k, {"photos": 0, "accepted": 0, "rejected": 0, "earn": 0.0, "sales": 0})
+                d["photos"] += 1
+                d["accepted"] += r.get("status") == "accepted"
+                d["rejected"] += r.get("status") == "rejected"
+                d["earn"] += r.get("earn", 0.0)
+                d["sales"] += r.get("sales", 0)
+        rows = []
+        for k, d in kw.items():
+            if d["photos"] < min_photos:
+                continue
+            judged = d["accepted"] + d["rejected"]
+            rows.append({"keyword": k, **d, "earn": round(d["earn"], 2),
+                         "rate": round(d["accepted"] / judged, 3) if judged else None,
+                         "per_photo": round(d["earn"] / d["photos"], 3)})
+        by_rate = [r for r in rows if r["rate"] is not None and r["accepted"] + r["rejected"] >= min_photos]
+        earners = sorted((r for r in recs if r.get("earn") or r.get("sales")),
+                         key=lambda r: (-r.get("earn", 0), -r.get("sales", 0)))[:10]
+        out.append({
+            "site": site, "label": SITES[site]["label"], "photos": len(recs), "accepted": acc, "rejected": rej,
+            "rate": round(acc / (acc + rej), 3) if acc + rej else None,
+            "earn": round(sum(r.get("earn", 0.0) for r in recs), 2),
+            "sales": sum(r.get("sales", 0) for r in recs),
+            "unmatched": sum(1 for r in recs if not r.get("file")),
+            "reasons": sorted(reasons.items(), key=lambda kv: -kv[1])[:8],
+            "rejected_most": sorted(by_rate, key=lambda r: (r["rate"], -r["photos"]))[:10],
+            "accepted_most": sorted(by_rate, key=lambda r: (-r["rate"], -r["photos"]))[:10],
+            "earns_most": sorted((r for r in rows if r["earn"] or r["sales"]),
+                                 key=lambda r: (-r["per_photo"], -r["sales"]))[:10],
+            "top_photos": [{"name": r["name"], "title": r.get("title", ""), "earn": round(r.get("earn", 0), 2),
+                            "sales": r.get("sales", 0)} for r in earners],
+        })
+    imports = sorted(res["imports"].values(), key=lambda i: i.get("date", ""), reverse=True)[:12]
+    return {"sites": out, "imports": imports}
+
+
+def pick_report_file():
+    """Ask for a report file (when StockUp runs in the browser instead of its own window)."""
+    try:
+        import tkinter
+        from tkinter import filedialog
+        root = tkinter.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        path = filedialog.askopenfilename(title="StockUp: choose a site report (CSV)",
+                                          filetypes=[("Spreadsheets", "*.csv *.txt *.tsv"), ("All files", "*")])
+        root.destroy()
+        return path
+    except Exception:
+        return ""
 
 
 def _bits_apart(a, b):
@@ -1205,6 +1505,8 @@ class Batch:
             s.setdefault("fixes", [])   # ["adobe:shorten_title", ...]
             s.setdefault("skip", [])    # sites you chose not to send this photo to
             s.setdefault("force", [])   # sites to send to even though a check says no
+            s.setdefault("releases", [])     # model/property release names, as you uploaded them to the sites
+            s.setdefault("no_release", False)  # you checked: no release needed (nobody recognisable)
         state = {f: st[f] for f in self.files}
         if opts["auto_categories"]:
             for f in self.files:
@@ -1256,6 +1558,8 @@ class Batch:
                     "ed_city": str(s.get("ed_city", "")).strip(),
                     "ed_region": str(s.get("ed_region", "")).strip(),
                     "ed_date": str(s.get("ed_date", "")).strip(),
+                    "releases": clean_releases(s.get("releases", old.get("releases", []))),
+                    "no_release": bool(s.get("no_release", old.get("no_release", False))),
                 })
                 cur = self.state[f]
                 for key, field in (("ss", "ss_cats"), ("adobe", "adobe_cat"), ("dt", "dt_cats")):
@@ -1505,6 +1809,26 @@ class Batch:
             for c in COPY_FIXES & applied:
                 if any(i["fix"] == c for i in issues):
                     ops.add(c)
+        need = release_needs(m)
+        if not s["editorial"] and not s.get("releases") and not s.get("no_release") \
+                and (need["model"] or need["property"]):
+            what = []
+            if need["model"]:
+                what.append(f"a model release (people: {', '.join(need['model'][:4])})")
+            if need["property"]:
+                what.append(f"a property release ({', '.join(need['property'][:4])})")
+            issue("warn", f"May need {' and '.join(what)}. Creative photos of recognisable people or "
+                          f"private property are rejected without one. Add the release name under "
+                          f"Releases, mark it editorial, or choose \u201cNo release needed\u201d.")
+        if s.get("releases") and not s["editorial"]:
+            if site in RELEASE_SITES_COLUMN:
+                issue("info", f"Release{'s' if len(s['releases']) > 1 else ''} "
+                              f"{', '.join(s['releases'])} go in {rules['label']}\u2019s spreadsheet. "
+                              f"Upload the release itself to {rules['label']} first, with this exact name.")
+            else:
+                issue("info", f"Attach release{'s' if len(s['releases']) > 1 else ''} "
+                              f"{', '.join(s['releases'])} on {rules['label']}\u2019s site after uploading: "
+                              f"{rules['label']}\u2019s spreadsheet has no releases column.")
         if site == "dreamstime" and not s["dt_cats"]:
             issue("warn", "No Dreamstime category chosen yet (for the Dreamstime spreadsheet).")
 
@@ -1542,6 +1866,7 @@ class Batch:
                         "preformatted": looks_editorial(m["description"]) or looks_editorial(m["title"]),
                         "auto": self.auto_reason(f, opts), "sites": sites,
                         "twins": self.twins.get(f, []), **self.state[f],
+                        "release_need": release_needs(m),
                         "steps": {st: self.sheet_status(f, st) for st in opts["my_sites"]
                                   if self.sheet_status(f, st)}})
         return out
@@ -1793,12 +2118,14 @@ def write_sheet(batch, site, rows, sd):
                 notes.append(f"[Shutterstock] {f}: no category chosen (required).")
     elif site == "adobe":
         write_csv(path, ["Filename", "Title", "Keywords", "Category", "Releases"],
-                  [[p["name"], p["title"], ",".join(p["keywords"]), s["adobe_cat"] or "", ""]
+                  [[p["name"], p["title"], ",".join(p["keywords"]), s["adobe_cat"] or "",
+                    "" if s["editorial"] else ",".join(s.get("releases", []))]
                    for f, p, s in rows])
     elif site == "depositphotos":
         write_csv(path, ["Filename", "Description", "Keywords", "Editorial", "Nudity", "Releases"],
                   [[p["name"], p["desc"], ",".join(p["keywords"]),
-                    "yes" if s["editorial"] else "no", "no", ""] for f, p, s in rows])
+                    "yes" if s["editorial"] else "no", "no",
+                    "" if s["editorial"] else ",".join(s.get("releases", []))] for f, p, s in rows])
     elif site == "dreamstime":
         write_csv(path, ["Filename", "Image Name", "Description", "Category 1", "Category 2",
                          "Category 3", "keywords", "Free", "W-EL", "P-EL", "SR-EL", "SR-Price",
@@ -2305,10 +2632,12 @@ def sheet_key(state, site):
     if site == "shutterstock":
         return [sorted(state.get("ss_cats", [])), bool(state.get("editorial"))]
     if site == "adobe":
-        return [state.get("adobe_cat") or ""]
+        return [state.get("adobe_cat") or ""] + ([sorted(state["releases"])] if state.get("releases") else [])
     if site == "dreamstime":
         return [list(state.get("dt_cats", [])), bool(state.get("editorial"))]
-    if site in ("depositphotos", "pond5"):
+    if site == "depositphotos":
+        return [bool(state.get("editorial"))] + ([sorted(state["releases"])] if state.get("releases") else [])
+    if site == "pond5":
         return [bool(state.get("editorial"))]
     return []
 
@@ -3211,6 +3540,7 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
   <div class="top">
     <h1>StockUp</h1><span class="sub" id="folder"></span><span class="mode" id="mode" onclick="openSettings()"></span>
     <button onclick="openChecks()" id="checksBtn">Check photos</button>
+    <button onclick="openResults()" title="Import the reports the sites let you download, and see what gets accepted, rejected and sold">Results</button>
     <div class="seg" id="theme" title="Light or dark look">
       <button data-t="auto">Auto</button><button data-t="light">Light</button><button data-t="dark">Dark</button>
     </div>
@@ -3229,6 +3559,7 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
         <option value="com">Show creative</option><option value="nocat">Show ones missing a category</option>
         <option value="issues">Show ones a site would reject</option>
         <option value="steps">Show ones waiting on a site step</option>
+        <option value="release">Show ones that may need a release</option>
       </select>
       <span class="hint" id="selcount">0 picked</span>
     </div>
@@ -3253,6 +3584,12 @@ pre{white-space:pre-wrap;font-size:12px;margin:4px 0}
     <div class="group"><b>Editorial: where &amp; when</b>
       <input id="ecity" placeholder="City"><input id="eregion" placeholder="State or country">
       <input id="edate" type="date"><button onclick="applyLoc()">Set</button>
+    </div>
+    <div class="group" title="For creative photos of recognisable people or private property. Upload the release to each site once, then type its name here exactly as it is on the site."><b>Releases</b>
+      <input id="relname" placeholder="Release name(s), comma separated">
+      <button onclick="applyRel()">Set</button>
+      <button onclick="noRel()" title="Nobody recognisable and no private property: no release needed">No release needed</button>
+      <button onclick="clearRel()">Clear</button>
     </div>
   </div>
 </header>
@@ -3317,8 +3654,9 @@ const hasIssue=it=>Object.values(it.sites).some(s=>s.status=='fix'||s.status=='s
 function visible(){
   const f=$('filter').value;
   return items.filter(it=>f=='all'||(f=='ed'&&it.editorial)||(f=='com'&&!it.editorial)||
-    (f=='nocat'&&((my().includes('shutterstock')&&!it.ss_cats.length)||(my().includes('adobe')&&!it.adobe_cat)||(my().includes('dreamstime')&&!it.dt_cats.length)))||(f=='issues'&&hasIssue(it))||(f=='steps'&&Object.values(it.steps||{}).some(x=>x!='applied')));
+    (f=='nocat'&&((my().includes('shutterstock')&&!it.ss_cats.length)||(my().includes('adobe')&&!it.adobe_cat)||(my().includes('dreamstime')&&!it.dt_cats.length)))||(f=='issues'&&hasIssue(it))||(f=='steps'&&Object.values(it.steps||{}).some(x=>x!='applied'))||(f=='release'&&needsRel(it)));
 }
+function needsRel(it){const n=it.release_need||{};return !it.editorial&&!(it.releases||[]).length&&!it.no_release&&((n.model||[]).length||(n.property||[]).length)}
 function chips(it){
   const word={ok:'ready',warn:'ready, with a note',fix:'needs a fix',skip:'not sending',sent:'sent'};
   return '<div class="chips">'+my().map(s=>{const st=it.sites[s];if(!st)return'';
@@ -3336,6 +3674,9 @@ function render(){
         t.push(`<span class="tag ${loc&&it.ed_date?'':'warn'}">${esc(loc||'add place')} · ${esc(it.ed_date||'add date')}</span>`);}
     }
     t.push(`<span class="tag">${it.keywords.length} keywords</span>`);
+    if((it.releases||[]).length&&!it.editorial)t.push(`<span class="tag ok" title="Release names sent with this photo">release: ${esc(it.releases.join(', '))}</span>`);
+    else if(needsRel(it)){const n=it.release_need,w=[...(n.model||[]),...(n.property||[])].slice(0,4).join(', ');
+      t.push(`<span class="tag warn" title="From the keywords: ${esc(w)}. Creative photos of recognisable people or private property need a release.">${(n.model||[]).length?'may need model release':'may need property release'}</span>`);}
     const au=k=>it.auto_cats.includes(k)?` <i class="auto" title="Picked automatically from: ${esc(it.cat_why.join(', '))}">auto</i>`:'';
     if(my().includes('shutterstock'))t.push(it.ss_cats.length?`<span class="tag">SS: ${esc(it.ss_cats.join(' + '))}${au('ss')}</span>`:'<span class="tag warn">no Shutterstock category</span>');
     if(my().includes('adobe')&&it.adobe_cat)t.push(`<span class="tag">Adobe: ${esc(AD[it.adobe_cat])}${au('adobe')}</span>`);
@@ -3388,6 +3729,10 @@ async function autoCats(){
 }
 function applyDT(){if(!need())return;const c=[$('dt1').value,$('dt2').value,$('dt3').value].filter(Boolean).map(Number);
   if(!c.length)return note('Choose a Dreamstime category first.');each(it=>it.dt_cats=[...new Set(c)])}
+function applyRel(){if(!need())return;const v=$('relname').value.split(',').map(x=>x.trim()).filter(Boolean);
+  if(!v.length)return note('Type the release name first, as it is on the sites.');each(it=>{it.releases=v;it.no_release=false})}
+function noRel(){if(need())each(it=>{it.no_release=true;it.releases=[]})}
+function clearRel(){if(need())each(it=>{it.no_release=false;it.releases=[]})}
 function applyLoc(){if(!need())return;const c=$('ecity').value.trim(),r=$('eregion').value.trim(),d=$('edate').value;
   if(!c&&!r&&!d)return note('Type a place or pick a date first.');each(it=>{if(c)it.ed_city=c;if(r)it.ed_region=r;if(d)it.ed_date=d})}
 let keepNoteUntil=0;
@@ -3396,7 +3741,7 @@ function counts(){const e=items.filter(i=>i.editorial).length;return `${e} edito
 function changed(){dirty=true;render();clearTimeout(saveT);saveT=setTimeout(async()=>{await save();await load()},500)}
 async function save(){
   if(!dirty)return;
-  const body={};items.forEach(it=>body[it.file]={editorial:it.editorial,ss_cats:it.ss_cats,adobe_cat:it.adobe_cat,dt_cats:it.dt_cats,ed_city:it.ed_city,ed_region:it.ed_region,ed_date:it.ed_date});
+  const body={};items.forEach(it=>body[it.file]={editorial:it.editorial,ss_cats:it.ss_cats,adobe_cat:it.adobe_cat,dt_cats:it.dt_cats,ed_city:it.ed_city,ed_region:it.ed_region,ed_date:it.ed_date,releases:it.releases||[],no_release:!!it.no_release});
   try{await api('/api/save',body);dirty=false;note('Saved · '+counts())}catch(e){note(e.message)}
 }
 function panel(html,keepScroll){openDetail=null;const p=$('panel');const y=p.scrollTop;p.innerHTML=html+'<p><button onclick="closePanel()">Close</button></p>';p.style.display='block';p.scrollTop=keepScroll?y:0}
@@ -3432,6 +3777,32 @@ function showDetail(f,keepScroll){
     }
   }
   panel(h,keepScroll);openDetail=f;
+}
+/* results: site reports */
+function pct(x){return x==null?'–':Math.round(x*100)+'%'}
+function money(x){return x?('$'+(+x).toFixed(2)):'–'}
+function kwTable(rows,col){if(!rows.length)return '<div class="hint">Not enough photos yet.</div>';
+  return '<table style="width:100%;font-size:12px;border-collapse:collapse">'+rows.map(r=>`<tr><td>${esc(r.keyword)}</td><td style="text-align:right">${r.photos} photos</td><td style="text-align:right">${col=='earn'?money(r.per_photo)+' each':pct(r.rate)+' accepted'}</td></tr>`).join('')+'</table>'}
+async function openResults(r){
+  try{r=r||await api('/api/results')}catch(e){return note(e.message)}
+  let h=`<h3>Results</h3><div class="hint">Download the reports from each site (accepted, rejected, sales or earnings, as CSV) and import them here. StockUp matches them to the photos it uploaded, so you can see which subjects and keywords get accepted and sell on which site. Importing the same report twice changes nothing.</div>
+  <p><select id="rsite"><option value="">Site: work it out from the file</option>${Object.keys(SITES).map(s=>`<option value="${s}">${esc(lab(s))}</option>`).join('')}</select>
+  <button class="primary" onclick="importReports()">Import reports…</button></p>`;
+  if(r.errors&&r.errors.length)h+=r.errors.map(e=>`<div class="err">${esc(e)}</div>`).join('');
+  if(r.imported&&r.imported.length)h+=r.imported.map(i=>`<div class="hint">${esc(i.file)} (${esc(i.label)}): ${i.already?'already imported':`${i.photos} photos, ${i.matched} matched to your uploads`}</div>`).join('');
+  if(!r.sites.length)h+='<div class="empty">No reports imported yet.</div>';
+  for(const s of r.sites){
+    h+=`<h4>${esc(s.label)}</h4><div class="hint">${s.photos} photos · ${s.accepted} accepted · ${s.rejected} rejected · acceptance ${pct(s.rate)}${s.earn||s.sales?` · ${money(s.earn)} from ${s.sales} sales`:''}${s.unmatched?` · ${s.unmatched} not matched to your uploads (sent before StockUp, or renamed)`:''}</div>`;
+    if(s.reasons.length)h+='<div style="margin:6px 0"><b>Why photos were rejected</b>'+s.reasons.map(([k,n])=>`<div class="hint">${n} × ${esc(k)}</div>`).join('')+'</div>';
+    if(s.rate!=null)h+=`<div style="display:flex;gap:16px;flex-wrap:wrap"><div style="flex:1;min-width:220px"><b>Keywords rejected most</b>${kwTable(s.rejected_most)}</div><div style="flex:1;min-width:220px"><b>Keywords accepted most</b>${kwTable(s.accepted_most)}</div></div>`;
+    if(s.earns_most.length)h+=`<div style="margin-top:6px"><b>Keywords that earn most per photo</b>${kwTable(s.earns_most,'earn')}</div>`;
+    if(s.top_photos.length)h+='<div style="margin-top:6px"><b>Best sellers</b>'+s.top_photos.map(p=>`<div class="hint">${esc(p.name)} · ${money(p.earn)} · ${p.sales} sales${p.title?' · '+esc(p.title):''}</div>`).join('')+'</div>';
+  }
+  if(r.imports&&r.imports.length)h+='<div class="hint" style="margin-top:12px">Imported: '+r.imports.map(i=>`${esc(i.file)} (${esc(lab(i.site))}, ${esc(i.date)})`).join(' · ')+'</div>';
+  panel(h);
+}
+async function importReports(){
+  try{const r=await api('/api/results/import',{site:$('rsite').value});if(r.cancelled)return;openResults(r)}catch(e){note(e.message)}
 }
 function generic(t){  // one line that is true for every photo in a group
   return t.replace(/\s*Suggested:.*$/,'').replace(/ is [\d.,]+ (characters|MB)/,' is too long').replace(/^Too small: [\d.]+ MP\./,'Too small.')
@@ -4239,6 +4610,8 @@ def make_handler(app):
                                             "frozen": FROZEN, "pillow": have_pillow()})
                 if p == "/api/sites":
                     return self._send(200, sites_summary())
+                if p == "/api/results":
+                    return self._send(200, results_summary())
                 if p == "/api/logins":
                     return self._send(200, logins_summary())
                 if p == "/api/status":
@@ -4373,6 +4746,20 @@ def make_handler(app):
                     return self._send(200, {"started": True})
                 if p == "/api/test":
                     return self._send(200, test_sites())
+                if p == "/api/results/import":
+                    paths = [str(x) for x in body.get("paths") or []]
+                    if not paths:
+                        paths = native_pick(app, "report") if app.window else [pick_report_file()]
+                    paths = [x for x in paths if x]
+                    if not paths:
+                        return self._send(200, {"cancelled": True})
+                    done, errors = [], []
+                    for path in paths:
+                        try:
+                            done.append(import_report(path, body.get("site") or None))
+                        except Exception as e:
+                            errors.append(f"{os.path.basename(path)}: {e}")
+                    return self._send(200, {"imported": done, "errors": errors, **results_summary()})
                 if p == "/api/preview":
                     ready = [s["name"] for s in sites_summary() if s["ready"]]
                     return self._send(200, upload_preview(
@@ -4769,6 +5156,9 @@ def native_pick(app, kind):
     import webview
     if kind == "folder":
         r = app.window.create_file_dialog(webview.FileDialog.FOLDER)
+    elif kind == "report":
+        r = app.window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=True,
+                                          file_types=("Spreadsheets (*.csv;*.txt;*.tsv)", "All files (*.*)"))
     else:
         r = app.window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=True,
                                           file_types=("JPEG photos (*.jpg;*.jpeg;*.JPG;*.JPEG)",))
