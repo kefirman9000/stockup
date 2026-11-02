@@ -172,11 +172,15 @@ The pictures above are remade with `python screenshots/make_screenshots.py`, usi
 If you'd rather not use the app, install [Python](https://www.python.org/downloads/), download `stockup.py`, and run it:
 
 ```
-pip install pillow keyring paramiko pywebview   optional extras: fixes, keychain, Adobe SFTP, own window
+pip install pillow keyring paramiko    optional extras: fixes, keychain, Adobe SFTP
 python stockup.py
 ```
 
-On a Mac, use `python3`, and once after installing Python, run *Applications › Python 3 › Install Certificates*. Without pywebview, the script opens in your web browser. To use the browser even when pywebview is installed, set `STOCKUP_BROWSER=1`. The script updates itself from the **Update now** button.
+On a Mac, use `python3`, and once after installing Python, run *Applications › Python 3 › Install Certificates*.
+
+The script opens in its own window, just like the app. The first time, it sets up the window library (pywebview) by itself, in its own folder rather than your Python, which takes a minute or two. On Linux this also brings Qt's page engine (about 500 MB) unless your computer already has GTK's; if Qt needs one more system package, StockUp tells you which (usually `sudo apt install libxcb-cursor0`). If the window can't be set up, or there's no screen (over SSH, say), the script opens in your web browser instead and tries the window again a week later. To always use the browser, set `STOCKUP_BROWSER=1`.
+
+The script updates itself from GitHub with the **Update now** button: it downloads the newest release, checks it against the release's fingerprint, keeps your current version as `stockup.py.bak`, and restarts on the batch you had open, back in its own window.
 
 Other commands:
 
