@@ -4,7 +4,7 @@ StockUp - send one batch of keyworded photos to several stock agencies.
 
   python stockup.py "/path/to/batch folder"
 
-Opens a page in your browser where you can:
+Opens in its own window (setting it up by itself the first time), where you can:
   * see every photo with the title and keywords already embedded in it
   * mark editorial or creative in bulk
   * see, for each site, what it would reject, and fix it in a click
@@ -15,6 +15,7 @@ Works with just the Python standard library. Optional extras:
                         (sRGB, smaller file, baseline JPEG, resize)
   pip install keyring   keeps your passwords in the system keychain
   pip install paramiko  only if Adobe Stock gave you SFTP details
+StockUp installs its window library (pywebview) by itself. STOCKUP_BROWSER=1 uses the browser.
 """
 
 import configparser
@@ -3392,17 +3393,21 @@ def launch_swap(kind, old, new, backup, folder):
         out.close()
 
 
-def restart_program(server, folder):
-    """Restart in place. With a folder: same page reconnects. Without: pick a new folder."""
+def restart_program(server, folder, app_in_browser=False):
+    """Restart in place, after the script updates itself. In its own window, the window
+    closes and the new version opens a fresh one on the same batch. In the browser, the
+    same tab reconnects to the new version."""
     def go():
         time.sleep(0.8)
         server.shutdown()
         server.server_close()
         env = dict(os.environ)
         args = [sys.executable] + ([] if FROZEN else [os.path.abspath(__file__)])
+        env["STOCKUP_PORT"] = str(server.server_address[1])  # same address, so a tab reconnects
         if folder:
-            env["STOCKUP_PORT"] = str(server.server_address[1])
             args.append(folder)
+        if app_in_browser:
+            env["STOCKUP_REOPEN_TAB"] = "1"  # the open tab reconnects; don't open a second one
         if os.name == "nt":
             import subprocess
             subprocess.Popen(args, env=env)
@@ -4475,6 +4480,7 @@ class App:
         self.last_ping = time.time()
         self.closed_at = None  # when the page said it was closing
         self.window = None     # StockUp's own window, when there is one
+        self.in_browser = False  # True when there is no window and the page is in a browser tab
         self.updater = AppUpdater()
         self.page_ready_at = None
         if batch:
@@ -4810,7 +4816,8 @@ def make_handler(app):
                     r = install_update()
                     self._send(200, r)
                     if r.get("updated"):
-                        restart_program(self.server, batch.folder if batch else None)
+                        restart_program(self.server, batch.folder if batch else None,
+                                        getattr(app, "in_browser", False))
                     return
                 if p == "/api/another":
                     if app.busy():
@@ -5020,13 +5027,17 @@ def serve(paths):
         if folder:
             app.open(folder, only)
 
-    if os.environ.get("STOCKUP_BROWSER") != "1" and open_window(app, url):
+    reopened_tab = os.environ.pop("STOCKUP_REOPEN_TAB", "") == "1"
+    if os.environ.get("STOCKUP_BROWSER") != "1" and ensure_window_library() \
+            and open_window(app, url):
         return 0  # the window was closed
 
     # No app window on this computer (or asked for the browser): use the web browser
     print(f"StockUp {VERSION} is open in your browser: {url}\n"
           "Keep this window open while you work. Close it (or press Ctrl+C) to quit.")
-    webbrowser.open(url)
+    app.in_browser = True
+    if not reopened_tab:  # after an update, the tab that was open reconnects by itself
+        webbrowser.open(url)
     if FROZEN:  # the app has no window of its own: quit a while after the page is closed
         def watchdog():
             while True:
@@ -5049,6 +5060,149 @@ def serve(paths):
 # --------------------------------------------------------------------------
 # StockUp's own window (instead of a browser tab)
 # --------------------------------------------------------------------------
+
+def window_lib_dir():
+    """Where the script keeps the window library it sets up for itself: one folder per
+    Python version, outside the script's folder so updates never touch it."""
+    if sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support/StockUp")
+    elif os.name == "nt":
+        base = os.path.join(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+                            or os.path.expanduser("~"), "StockUp")
+    else:
+        base = os.path.join(os.environ.get("XDG_DATA_HOME") or
+                            os.path.expanduser("~/.local/share"), "stockup")
+    return os.path.join(base, f"window-py{sys.version_info[0]}.{sys.version_info[1]}")
+
+
+def _window_lib_importable():
+    try:
+        import webview  # noqa: F401
+        from webview.dom import DOMEventHandler  # noqa: F401
+        return True
+    except Exception:
+        for name in [m for m in sys.modules if m == "webview" or m.startswith("webview.")]:
+            sys.modules.pop(name, None)  # a half-import shouldn't stick
+        return False
+
+
+def _window_packages():
+    """What to install for a window. Linux needs a page engine too: GTK's if the computer
+    already has it, otherwise Qt's, which comes ready-made from pip."""
+    if sys.platform.startswith("linux"):
+        try:
+            import gi  # noqa: F401
+            return ["pywebview"]
+        except Exception:
+            return ["pywebview[qt]"]
+    return ["pywebview"]
+
+
+def _linux_window_works(lib):
+    """On Linux, Qt ends the whole program (rather than failing politely) if the computer is
+    missing one of its system libraries. So the first time, StockUp tries making a window
+    in a separate process; once that works, it remembers."""
+    if not sys.platform.startswith("linux"):
+        return True
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False  # no screen (e.g. over SSH): the browser it is
+    try:
+        import gi  # noqa: F401  GTK's page engine doesn't have this problem
+        return True
+    except Exception:
+        pass
+    if os.path.isdir(os.path.join(lib, "PyQt6")):
+        os.environ.setdefault("PYWEBVIEW_GUI", "qt")  # skip pywebview's noisy try of GTK
+    ok_mark = os.path.join(lib, ".window-works")
+    if os.path.exists(ok_mark):
+        return True
+    import subprocess
+    probe = ("import sys; sys.path.insert(0, sys.argv[1]); "
+             "from PyQt6.QtWidgets import QApplication; "
+             "from PyQt6.QtWebEngineWidgets import QWebEngineView; QApplication(['StockUp'])")
+    try:
+        r = subprocess.run([sys.executable, "-c", probe, lib], capture_output=True,
+                           text=True, timeout=60, stdin=subprocess.DEVNULL)
+    except Exception:
+        return False
+    if r.returncode == 0:
+        try:
+            open(ok_mark, "w").close()
+        except OSError:
+            pass
+        return True
+    if "xcb-cursor" in r.stderr:
+        print("StockUp's window needs one more system package. Install it with\n"
+              "  sudo apt install libxcb-cursor0      (Ubuntu, Debian, Mint)\n"
+              "  sudo dnf install xcb-util-cursor     (Fedora)\n"
+              "and StockUp will open in its own window. Using your browser for now.", flush=True)
+    return False
+
+
+def ensure_window_library(pip_runner=None):
+    """The script opens in its own window, like the app. The first time, if the window
+    library isn't installed, StockUp installs it for itself (into its own folder, not your
+    Python) and then uses it. Returns True when the window library can be used.
+    If setting it up fails, StockUp uses the browser and tries again a week later."""
+    if FROZEN:
+        return _window_lib_importable()
+    lib = window_lib_dir()
+    if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY")
+                                                 or os.environ.get("WAYLAND_DISPLAY")):
+        return False  # no screen to show a window on
+    if os.path.isdir(lib) and lib not in sys.path:
+        sys.path.insert(0, lib)
+    if _window_lib_importable():
+        return _linux_window_works(lib)
+    os.makedirs(os.path.dirname(lib), exist_ok=True)
+    failed = lib + ".failed"
+    try:
+        if time.time() - os.path.getmtime(failed) < 7 * 86400:
+            return False
+    except OSError:
+        pass
+    print("Setting up StockUp's own window. This happens once and takes a minute or two…",
+          flush=True)
+    tmp = lib + ".new"
+    shutil.rmtree(tmp, ignore_errors=True)
+    cmd = [sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
+           "--no-warn-script-location", "--target", tmp] + _window_packages()
+    try:
+        if pip_runner:
+            ok = pip_runner(cmd)
+        else:
+            import subprocess
+            ok = subprocess.run(cmd, stdin=subprocess.DEVNULL).returncode == 0
+    except Exception:
+        ok = False
+    if ok and os.path.isdir(tmp):
+        old = lib + ".old"
+        shutil.rmtree(old, ignore_errors=True)
+        if os.path.isdir(lib):
+            os.replace(lib, old)
+        os.replace(tmp, lib)
+        shutil.rmtree(old, ignore_errors=True)
+        if lib not in sys.path:
+            sys.path.insert(0, lib)
+        import importlib
+        importlib.invalidate_caches()
+        if _window_lib_importable():
+            try:
+                os.remove(failed)
+            except OSError:
+                pass
+            if not _linux_window_works(lib):
+                return False
+            print("Done. StockUp will open in its own window from now on.", flush=True)
+            return True
+    shutil.rmtree(tmp, ignore_errors=True)
+    with open(failed, "w", encoding="utf-8") as fh:
+        fh.write(time.strftime("%Y-%m-%d %H:%M"))
+    print("StockUp couldn't set up its own window here, so it will use your browser. To try\n"
+          f"again, run:  {os.path.basename(sys.executable)} -m pip install "
+          f"{' '.join(_window_packages())}", flush=True)
+    return False
+
 
 def open_window(app, url):
     """Show StockUp in its own window, using the page engine built into the computer
