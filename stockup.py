@@ -42,7 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 STARTED = time.time()
@@ -288,6 +288,7 @@ DEFAULT_OPTIONS = {
     "flag_formatted": True,
     "drop_marker_keyword": True,
     "adobe_strip_commas": True,
+    "shutterstock_title": True,      # Shutterstock gets the title (its one text field is shown as the title)
     "upload_sites": [],
     "my_sites": DEFAULT_MY_SITES,
     # Safety. "untouched": every site gets your exact original file (byte for byte).
@@ -1659,6 +1660,15 @@ class Batch:
 
         title = m["title"] or m["description"]
         desc = m["description"] or m["title"]
+        if site == "shutterstock" and opts.get("shutterstock_title", True):
+            # Shutterstock has one text field: its spreadsheet calls it Description, but the site shows it as the
+            # photo's title. So it gets your title, unless that's too short for Shutterstock (then the caption).
+            # (A caption already written as an editorial caption, with a place and date, is kept when the title
+            # has none: that one was written for the sites on purpose.)
+            own = (m["title"] or "").strip()
+            if len(own.split()) >= rules.get("desc_min_words", 5) and \
+                    not (looks_editorial(m["description"]) and not looks_editorial(own)):
+                desc = own
         marker = opts["editorial_keyword"].strip().lower()
         kws = m["keywords"]
         if marker and opts["drop_marker_keyword"]:
@@ -3886,6 +3896,8 @@ function openSettings(){
     <span>Always use my titles and captions exactly as written</span></label>
   <label class="row"><input type="checkbox" id="o_commas" ${o.adobe_strip_commas?'checked':''}>
     <span>Take commas out of Adobe titles (Adobe asks for this)</span></label>
+  <label class="row"><input type="checkbox" id="o_sstitle" ${o.shutterstock_title?'checked':''}>
+    <span>Send Shutterstock my title rather than the caption (it shows that text as the title; a title under 5 words sends the caption)</span></label>
   <div class="hint" style="margin-top:12px">Mark photos as editorial automatically when…</div>
   <label class="row"><input type="checkbox" id="o_fmt" ${o.flag_formatted?'checked':''}>
     <span>the caption already starts with a place and date</span></label>
@@ -3904,7 +3916,7 @@ async function saveSettings(){
   if($('o_rmode').value!='off'&&!(parseFloat(rv)>0))return note('Type a size for “Resize for upload”, or choose “Don’t resize”.');
   const o={photo_mode:document.querySelector('input[name=pm]:checked').value,resize_mode:$('o_rmode').value,resize_value:rv,
     strip_gps:$('o_gps').checked,skip_sent:$('o_skip').checked,encrypted_only:$('o_enc').checked,
-    upload_order:$('o_order').value,upload_pacing:$('o_pace').value,auto_categories:$('o_cats').checked,caption_mode:document.querySelector('input[name=cm]:checked').value,adobe_strip_commas:$('o_commas').checked,
+    upload_order:$('o_order').value,upload_pacing:$('o_pace').value,auto_categories:$('o_cats').checked,caption_mode:document.querySelector('input[name=cm]:checked').value,adobe_strip_commas:$('o_commas').checked,shutterstock_title:$('o_sstitle').checked,
     flag_formatted:$('o_fmt').checked,editorial_keyword:$('o_kw').value,drop_marker_keyword:$('o_drop').checked,editorial_label:$('o_lab').value,
     my_sites:[...document.querySelectorAll('.mysite:checked')].map(i=>i.value)};
   try{const r=await api('/api/options',o);await load();await loadSites();

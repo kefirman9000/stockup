@@ -1,12 +1,7 @@
-**New in 1.8: releases, and what each site actually accepts and buys**
+**StockUp 1.8.1: Shutterstock gets your title**
 
-**Model and property releases**
-- Creative photos whose title or keywords mention people (woman, portrait, family…) or private property (interiors, artwork, tattoos, logos…) are flagged **may need model release** / **may need property release**, with a note in each site's check. *Show ones that may need a release* lists them.
-- Pick the photos and type the release name in the new **Releases** bar, exactly as you uploaded it to the sites. It goes into the **Releases** column of Adobe Stock's and Depositphotos' spreadsheets; for the other sites, StockUp reminds you to attach it on the site. **No release needed** clears the flag for photos where nobody is recognisable. Editorial photos never need one.
-
-**Results: import the sites' own reports**
-- **Results** (top of the window) imports the reports the sites let you download: accepted / rejected lists, and sales or earnings. StockUp works out the site and the columns by itself and matches each photo to what it uploaded, even when the report spells the name differently.
-- For each site you see the acceptance rate, **why photos were rejected**, the **keywords rejected most and accepted most**, the **keywords that earn most per photo**, and your best sellers. Importing the same report twice changes nothing.
-- If a report has no file name column, StockUp says which columns it found, so you know which report to download instead.
+- **Fix:** Shutterstock's spreadsheet has one text column. It's called *Description*, but Shutterstock shows that text as the photo's **title**. StockUp put the photo's caption (description) there, so photos tagged with a full title and a longer, sentence-style caption, as IPTC Tagger saves them, showed the caption on Shutterstock instead of the title. `shutterstock.csv` now gets your **title**, exactly as written.
+- The caption is still used when the title is under 5 words (Shutterstock's minimum), or when the caption is already written as an editorial caption (place and date first) and the title isn't.
+- To send the caption as before, untick **Settings › Titles and captions › Send Shutterstock my title rather than the caption**.
 
 Download the zip for your computer below, or press **Update now** in StockUp.

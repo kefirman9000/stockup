@@ -53,6 +53,7 @@ def test_editorial_is_marked_automatically(stockup, batch_dir):
 
 
 def test_editorial_captions(stockup, batch_dir):
+    stockup.save_options({"shutterstock_title": False})   # (these are about the caption: Shutterstock gets it)
     make_photo(batch_dir, "new.jpg", desc="Boats leave the harbor for the regatta")
     make_photo(batch_dir, "ready.jpg", seed=1, desc="CAMDEN, MAINE - JULY 4, 2026: Boats leave the harbor")
     b = stockup.Batch(batch_dir)

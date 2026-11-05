@@ -136,3 +136,41 @@ def test_site_steps_track_each_photos_spreadsheet(stockup, batch_dir):
     assert b.sheet_status("b.jpg", "shutterstock") == "applied"
     again = stockup.finish_overview(b)[0]
     assert again["changed"] == 1 and [r["Filename"] for r in read(again["file"])] == ["a.jpg"]
+
+
+def test_shutterstock_gets_the_title_not_the_caption(stockup, batch_dir):
+    # what IPTC Tagger saves: a full title, and a longer sentence-style caption
+    title = "Gerber Puffs Cereal Snacks Variety Pack on Grocery Store Shelf, Featuring Banana and Strawberry Flavors"
+    caption = "A colorful display of Gerber Graduates Puffs cereal snacks is arranged on a grocery store shelf."
+    make_photo(batch_dir, "puffs.jpg", title=title, desc=caption)
+    make_photo(batch_dir, "short.jpg", title="Harbor boats", desc="Sailboats anchored on a calm bay at sunset", seed=1)
+    stockup.save_options({"my_sites": ["shutterstock", "alamy"]})
+    out = stockup.build_outputs(stockup.Batch(batch_dir))["folder"]
+    ss = {row["Filename"]: row for row in read(f"{out}/shutterstock/shutterstock.csv")}
+    assert ss["puffs.jpg"]["Description"] == title
+    assert ss["short.jpg"]["Description"] == "Sailboats anchored on a calm bay at sunset"   # 2-word title: caption
+
+
+def test_shutterstock_can_get_the_caption(stockup, batch_dir):
+    caption = "A colorful display of Gerber Graduates Puffs cereal snacks is arranged on a grocery store shelf."
+    make_photo(batch_dir, "puffs.jpg", title="Gerber Puffs Cereal Snacks on a Grocery Store Shelf", desc=caption)
+    stockup.save_options({"my_sites": ["shutterstock"], "shutterstock_title": False})
+    out = stockup.build_outputs(stockup.Batch(batch_dir))["folder"]
+    assert read(f"{out}/shutterstock/shutterstock.csv")[0]["Description"] == caption
+
+
+def test_shutterstock_editorial_titles(stockup, batch_dir):
+    # IPTC Tagger: the title and the caption both start with the place and date: the title goes, exactly as written
+    title = ("Holly Springs, North Carolina - November 4, 2026: Gerber Puffs Cereal Snacks Variety Pack on Grocery "
+             "Store Shelf")
+    caption = ("Holly Springs, North Carolina - November 4, 2026: A colorful display of Gerber Graduates Puffs "
+               "cereal snacks is arranged on a grocery store shelf.")
+    make_photo(batch_dir, "puffs.jpg", title=title, desc=caption)
+    # a ready-made editorial caption, and a title without a place and date: the caption goes
+    make_photo(batch_dir, "regatta.jpg", seed=1, title="Sailboats leaving the harbor for the regatta",
+               desc="CAMDEN, MAINE - JULY 4, 2026: Boats leave the harbor for the regatta")
+    b = stockup.Batch(batch_dir)
+    for f in b.files:
+        b.state[f].update(editorial=True, ed_city="Holly Springs", ed_region="North Carolina", ed_date="2026-11-04")
+    assert b.plan("puffs.jpg", "shutterstock")["desc"] == title
+    assert b.plan("regatta.jpg", "shutterstock")["desc"] == "CAMDEN, MAINE - JULY 4, 2026: Boats leave the harbor for the regatta"
