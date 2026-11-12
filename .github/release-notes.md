@@ -1,7 +1,7 @@
-**StockUp 1.8.1: Shutterstock gets your title**
+**StockUp 1.8.2: Update now works on Windows**
 
-- **Fix:** Shutterstock's spreadsheet has one text column. It's called *Description*, but Shutterstock shows that text as the photo's **title**. StockUp put the photo's caption (description) there, so photos tagged with a full title and a longer, sentence-style caption, as IPTC Tagger saves them, showed the caption on Shutterstock instead of the title. `shutterstock.csv` now gets your **title**, exactly as written.
-- The caption is still used when the title is under 5 words (Shutterstock's minimum), or when the caption is already written as an editorial caption (place and date first) and the title isn't.
-- To send the caption as before, untick **Settings › Titles and captions › Send Shutterstock my title rather than the caption**.
+- **Fix: Update now never finished on Windows.** The helper that puts the new version in place was starting inside the StockUp folder, and Windows won't rename a folder that a running program is in. It gave up, left everything as it was and reopened your old version. The helper now starts outside the folder.
+- **Download this version yourself once.** The copy you have now still runs the old helper, so its Update now can't install 1.8.2. Unzip the download over your old StockUp folder, or next to it. Update now works from 1.8.2 onward.
+- **StockUp's features are moving into [IPTC Tagger](https://github.com/kefirman9000/iptc-tagger).** IPTC Tagger now uploads to all eight sites, with the same checks, site spreadsheets, shuffled order and adjusted copies, in the same app you tag in. It uses StockUp's saved logins and knows what StockUp already sent, so nothing goes up twice. StockUp keeps working, but new site fixes will go into IPTC Tagger.
 
-Download the zip for your computer below, or press **Update now** in StockUp.
+Download the zip for your computer below.

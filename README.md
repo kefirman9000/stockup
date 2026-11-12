@@ -1,5 +1,9 @@
 # StockUp
 
+> **StockUp is moving into [IPTC Tagger](https://github.com/kefirman9000/iptc-tagger).** IPTC Tagger now tags *and* uploads to all eight sites, with StockUp's checks, site spreadsheets, shuffled upload order and adjusted copies. It reads StockUp's saved logins and what StockUp already sent, so nothing goes up twice. StockUp still works and gets fixes for serious problems, but new site rules go into IPTC Tagger.
+>
+> **On Windows, if Update now didn't work for you:** download 1.8.2 yourself once from the Releases page. From then on, Update now works.
+
 **Send one batch of stock photos to every agency you sell on, without typing anything twice.**
 
 StockUp works with Shutterstock, Adobe Stock, Dreamstime, Alamy, iStock, Depositphotos, 123RF and Pond5.

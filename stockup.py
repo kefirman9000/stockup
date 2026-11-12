@@ -42,7 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 STARTED = time.time()
@@ -3217,6 +3217,8 @@ echo "reopened" >> "$log"
 WIN_SWAP = r'''param([int]$WaitPid, [string]$Old, [string]$New, [string]$Backup, [string]$Launch = '', [string]$Arg = '')
 # StockUp update: wait for StockUp to quit, swap in the new version, keep the old one, reopen.
 $Log = Join-Path (Split-Path (Split-Path $Backup)) 'update.log'
+# Windows won't rename a folder that any program is "in", this script included: start outside it.
+Set-Location -LiteralPath (Split-Path -Parent $Old) -ErrorAction SilentlyContinue
 function Note([string]$t) { Add-Content -LiteralPath $Log -Value ((Get-Date -Format s) + ' ' + $t) }
 Set-Content -LiteralPath $Log -Value ((Get-Date -Format s) + " waiting for StockUp ($WaitPid) to quit")
 try { Wait-Process -Id $WaitPid -Timeout 120 -ErrorAction Stop } catch { Note "wait: $_" }
@@ -3380,7 +3382,7 @@ def launch_swap(kind, old, new, backup, folder):
         relaunch = test_launch.split("\x1f") if test_launch else \
             (["open", "-n", old] + (["--args", folder] if folder else []))
         subprocess.Popen(["/bin/bash", script, wait_pid, old, new, backup] + relaunch,
-                         start_new_session=True, stdin=subprocess.DEVNULL,
+                         start_new_session=True, cwd=os.path.dirname(os.path.dirname(script)), stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
         script = os.path.join(os.path.dirname(os.path.dirname(backup)), "swap.ps1")
@@ -3397,8 +3399,11 @@ def launch_swap(kind, old, new, backup, folder):
             args += ["-Arg", arg]
         out = open(os.path.join(os.path.dirname(script), "swap-output.txt"), "w")
         flags = 0x00000200 | 0x08000000  # its own process group, no console window
+        # Run it from outside the StockUp folder: Windows won't rename a folder that a running
+        # program (this helper, inheriting StockUp's own) is in, so the swap always failed.
         subprocess.Popen(args, creationflags=flags, stdin=subprocess.DEVNULL,
-                         stdout=out, stderr=subprocess.STDOUT, close_fds=True)
+                         stdout=out, stderr=subprocess.STDOUT, close_fds=True,
+                         cwd=os.path.dirname(os.path.dirname(script)))
         out.close()
 
 
