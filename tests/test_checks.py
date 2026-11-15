@@ -121,3 +121,43 @@ def test_batch_opens_before_the_full_check_and_remembers_it(stockup, batch_dir):
     finally:
         stockup.file_sha256 = real
     assert calls == [] and b2.sha == b.sha  # reopened from memory
+
+
+def test_alamy_uploads_go_into_stock_and_top_level_sends_dont_count(stockup, tmp_path, batch_dir):
+    import ftplib
+    import json
+    assert stockup._remote_dir("alamy", "/") == "Stock" and stockup._remote_dir("alamy", "Vectors") == "Vectors"
+    assert stockup._remote_dir("shutterstock", "/") == "/"
+    p = make_photo(batch_dir, "a.jpg")
+    other = tmp_path / "older batch"
+    other.mkdir()
+    shutil.copy(p, other / "a.jpg")
+    sha = stockup.file_sha256(p)
+    # sent to Alamy's top level by an earlier StockUp (no folder recorded): Alamy never got it
+    h = {"sha": {sha: {"alamy": {"date": "2026-11-12", "batch": str(other), "file": "a.jpg"},
+                       "shutterstock": {"date": "2026-11-12", "batch": str(other), "file": "a.jpg"}}},
+         "looks": []}
+    with open(stockup.HISTORY_PATH, "w", encoding="utf-8") as fh:
+        json.dump(h, fh)
+    b = stockup.Batch(batch_dir)
+    assert b.plan("a.jpg", "alamy")["status"] != "skip"
+    assert b.plan("a.jpg", "shutterstock")["status"] == "skip"
+    stockup.record_history("alamy", str(other), "a.jpg", sha, "", "Stock")
+    assert stockup.Batch(batch_dir).plan("a.jpg", "alamy")["status"] == "skip"
+
+    class FakeFtp:
+        def __init__(self, folders):
+            self.folders, self.at = folders, "/"
+
+        def cwd(self, d):
+            if d not in self.folders:
+                raise ftplib.error_perm("550 No such folder")
+            self.at = d
+
+        def nlst(self):
+            return list(self.folders)
+    conn = stockup.FTPConn.__new__(stockup.FTPConn) if hasattr(stockup, "FTPConn") else None
+    if conn is not None:
+        conn.ftp = FakeFtp(["Live News", "stock"])
+        conn._cd({"remote_dir": "Stock", "host": "upload.alamy.com"})
+        assert conn.ftp.at == "stock"

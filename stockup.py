@@ -42,7 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.8.2"
+VERSION = "1.8.3"
 REPO = "kefirman9000/stockup"
 FROZEN = bool(getattr(sys, "frozen", False))  # running as the Mac/Windows app
 STARTED = time.time()
@@ -119,6 +119,8 @@ SITES = {
         "label": "Alamy", "short": "AL",
         "ftp": {"protocol": "ftp", "host": "upload.alamy.com", "port": 21},
         "login_hint": "The email you sign in to Alamy with, and your Alamy password.",
+        # Alamy only takes photos from its folders (Stock, Live News, Archive stock, Vectors), not the top level
+        "remote_dir": "Stock",
         "min_px": 17_000_000 // 3, "min_label": "17 MB when opened (about 6 MP)",
         "baseline": True,
         "csv_note": "Alamy reads your titles and keywords from the photos. In Alamy Image "
@@ -1002,13 +1004,13 @@ def load_history():
         return {"sha": {}, "looks": []}
 
 
-def record_history(site, folder, f, sha, look):
+def record_history(site, folder, f, sha, look, remote_dir="/"):
     with _history_lock:
         h = load_history()
-        entry = {"date": datetime.now().strftime("%Y-%m-%d"), "batch": folder, "file": f}
+        entry = {"date": datetime.now().strftime("%Y-%m-%d"), "batch": folder, "file": f, "dir": remote_dir or "/"}
         h["sha"].setdefault(sha, {})[site] = entry
         if look:
-            h["looks"].append([look, site, entry["date"], folder, f])
+            h["looks"].append([look, site, entry["date"], folder, f, remote_dir or "/"])
         tmp = HISTORY_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(h, fh)
@@ -1437,6 +1439,8 @@ class Batch:
     def sent_before(self, f, site):
         """(how it matched, entry) if this photo went to this site from another batch."""
         e = self.history["sha"].get(self.sha.get(f), {}).get(site)
+        if e and not counts_as_sent(site, e.get("dir")):
+            e = None
         if e and not (e["batch"] == self.folder and e["file"] == f):
             return "exact", e
         look = self.look.get(f)
@@ -1468,7 +1472,10 @@ class Batch:
     def _looks_index(self):
         if self._looks_idx is None:
             self._looks, idx = [], {}
-            for lk, st, date, folder, name in self.history["looks"]:
+            for row in self.history["looks"]:
+                lk, st, date, folder, name = row[:5]
+                if not counts_as_sent(st, row[5] if len(row) > 5 else ""):
+                    continue
                 try:
                     v = int(lk, 16)
                 except (TypeError, ValueError):
@@ -2340,8 +2347,21 @@ def load_sites():
         sites.append({"name": site, "enabled": v["enabled"], "protocol": proto,
                       "host": v["host"] or ftp["host"], "port": port,
                       "username": v["username"], "password": pw,
-                      "remote_dir": v["remote_dir"] or "/"})
+                      "remote_dir": _remote_dir(site, v["remote_dir"])})
     return sites
+
+
+def _remote_dir(site, saved):
+    """The folder to upload into: the one you set, else the site's own (Alamy: Stock), else the top level.
+    A saved '/' counts as not set for a site with its own folder (logins saved before it had one)."""
+    saved = (saved or "").strip()
+    own = SITES.get(site, {}).get("remote_dir", "")
+    return own if own and saved in ("", "/") else (saved or "/")
+
+
+def counts_as_sent(site, folder):
+    """A photo sent to Alamy's top level (before StockUp used its Stock folder) never reached Alamy."""
+    return not (SITES.get(site, {}).get("remote_dir") and not folder)
 
 
 def save_logins(changes):
@@ -2442,8 +2462,18 @@ class FTPConn:
             self._cd(site)
 
     def _cd(self, site):
-        if site["remote_dir"] not in ("", "/"):
-            self.ftp.cwd(site["remote_dir"])
+        want = site["remote_dir"]
+        if want in ("", "/"):
+            return
+        try:
+            self.ftp.cwd(want)
+        except ftplib.error_perm:
+            names = self.listdir()                # the same folder written another way ("stock" / "Stock")
+            match = next((n for n in names if n.casefold() == want.strip("/").casefold()), None)
+            if match is None:
+                raise RuntimeError(f"There's no '{want}' folder on {site['host']}" +
+                                   (f" (it has: {', '.join(sorted(names)[:8])})" if names else "") + ".")
+            self.ftp.cwd(match)
 
     def listdir(self):
         try:
@@ -2778,7 +2808,7 @@ class Uploader:
                 json.dump({k: sorted(v) for k, v in p.items() if v}, fh, indent=1)
             os.replace(tmp, self.partial_path)
 
-    def _mark_done(self, site, f, sent_as, local, encrypted):
+    def _mark_done(self, site, f, sent_as, local, encrypted, remote_dir="/"):
         with self.lock:
             log = self._load_log()
             log.setdefault(site, [])
@@ -2802,7 +2832,7 @@ class Uploader:
                             "yes" if encrypted else "no",
                             self.batch.sha[f] if same else file_sha256(local)])
         self._set_partial(site, sent_as, False)
-        record_history(site, self.batch.folder, f, self.batch.sha[f], self.batch.look.get(f, ""))
+        record_history(site, self.batch.folder, f, self.batch.sha[f], self.batch.look.get(f, ""), remote_dir)
 
     # ---- controls -----------------------------------------------------------
     def status(self):
@@ -3015,7 +3045,8 @@ class Uploader:
                     time.sleep(2 * attempt)
             if ok:
                 failures_in_row = 0
-                self._mark_done(name, f, remote, local, conn.encrypted if conn else False)
+                self._mark_done(name, f, remote, local, conn.encrypted if conn else False,
+                                site.get("remote_dir") or "/")
                 ours.discard(remote)
                 with self.lock:
                     self.progress[name]["done"] += 1
